@@ -190,7 +190,7 @@ def normalizar_fecha(valor):
 
 def guardar_cambios(df_edit_full, ids_originales, modo, ids_marcados_borrar=None):
     """Sincroniza cambios con Supabase, incluyendo borrados marcados con la papelera.
-       Además limpia NaN/NaT para que el JSON sea válido.
+       Solo guarda filas 'completas' y limpia NaN/NaT para que el JSON sea válido.
     """
     import pandas as _pd
 
@@ -214,28 +214,41 @@ def guardar_cambios(df_edit_full, ids_originales, modo, ids_marcados_borrar=None
         if row_id in ids_marcados_borrar:
             continue
 
-        # REGLA PARA TRANSFERENCIAS: campos obligatorios mínimos
+        # ---- REGLAS DE FILA COMPLETA SEGÚN MODO ----
         if modo == "transferencias":
-            if (
-                row_dict.get("fecha") in (None, "", "NaT")
-                or not row_dict.get("cuenta")
-                or not row_dict.get("cuenta_destino")
-            ):
+            # necesitamos: fecha, cuenta origen, cuenta destino e importe
+            fecha_ok = row_dict.get("fecha") not in (None, "", "NaT")
+            cuenta_ok = bool(row_dict.get("cuenta"))
+            cuenta_dest_ok = bool(row_dict.get("cuenta_destino"))
+            importe_ok = row_dict.get("importe") not in (None, "", 0, 0.0)
+
+            if not (fecha_ok and cuenta_ok and cuenta_dest_ok and importe_ok):
+                # fila aún en edición → no se guarda
                 continue
-        else:
-            # gastos / ingresos: saltamos filas totalmente vacías
+
+        else:  # gastos / ingresos
+            # necesitamos: fecha, categoría, cuenta e importe
+            fecha_ok = row_dict.get("fecha") not in (None, "", "NaT")
+            categoria_ok = bool(row_dict.get("categoria"))
+            cuenta_ok = bool(row_dict.get("cuenta"))
+            importe_ok = row_dict.get("importe") not in (None, "", 0, 0.0)
+
+            # si está totalmente vacía → la ignoramos
             if (
                 row_dict.get("fecha") in (None, "", "NaT")
                 and not row_dict.get("categoria")
                 and not row_dict.get("descripcion")
+                and not row_dict.get("cuenta")
                 and not row_dict.get("importe")
             ):
                 continue
 
-        # Normalizar fecha
-        row_dict["fecha"] = normalizar_fecha(row_dict.get("fecha"))
+            # si no está vacía pero le falta algo → todavía no guardamos
+            if not (fecha_ok and categoria_ok and cuenta_ok and importe_ok):
+                continue
 
-        # Importe seguro
+        # ---- Normalizar fecha e importe ----
+        row_dict["fecha"] = normalizar_fecha(row_dict.get("fecha"))
         try:
             row_dict["importe"] = float(row_dict.get("importe") or 0)
         except Exception:
@@ -251,7 +264,6 @@ def guardar_cambios(df_edit_full, ids_originales, modo, ids_marcados_borrar=None
         data = {}
         for col in DB_COLUMNS:
             v = row_dict.get(col, None)
-            # pd.isna() detecta NaN, NaT, pd.NA, etc.
             if _pd.isna(v):
                 v = None
             data[col] = v
@@ -261,6 +273,7 @@ def guardar_cambios(df_edit_full, ids_originales, modo, ids_marcados_borrar=None
             update_movimiento(row_id, data)
         else:
             insert_movimiento(data)
+
 
 
 
@@ -708,10 +721,6 @@ with tab_balances:
             "Gastos": gg,
             "Ahorro": gi - gg,
         })
-    if data_mes:
-        df_mes = pd.DataFrame(data_mes).set_index("periodo")
-        st.markdown("**Evolución mensual (Ingresos, Gastos, Ahorro)**")
-        st.line_chart(df_mes)
 
     if modo_movil:
         st.markdown("**Gasto por categoría**")
