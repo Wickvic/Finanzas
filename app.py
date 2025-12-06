@@ -181,11 +181,15 @@ def normalizar_fecha(valor):
 
 
 def guardar_cambios(df_edit_full, ids_originales, modo, ids_marcados_borrar=None):
-    """Sincroniza cambios con Supabase, incluyendo borrados marcados con la papelera."""
+    """Sincroniza cambios con Supabase, incluyendo borrados marcados con la papelera.
+       Además limpia NaN/NaT para que el JSON sea válido.
+    """
+    import pandas as _pd
+
     if ids_marcados_borrar is None:
         ids_marcados_borrar = set()
 
-    # Borrados: filas que desaparecen + filas marcadas con papelera
+    # ---- Borrados (filas que desaparecen + marcadas con papelera) ----
     ids_editados = set(df_edit_full["id"].dropna())
     ids_a_borrar = (ids_originales - ids_editados) | set(ids_marcados_borrar)
 
@@ -193,15 +197,16 @@ def guardar_cambios(df_edit_full, ids_originales, modo, ids_marcados_borrar=None
         if borrar_id:
             delete_movimiento(borrar_id)
 
-    # Altas/updates
+    # ---- Altas / updates ----
     for _, row in df_edit_full.iterrows():
         row_dict = row.to_dict()
         row_id = row_dict.get("id", None)
 
-        # si está marcada para borrar, ignoramos (ya borrado arriba)
+        # si está marcada para borrar, la ignoramos (ya borrada arriba)
         if row_id in ids_marcados_borrar:
             continue
 
+        # REGLA PARA TRANSFERENCIAS: campos obligatorios mínimos
         if modo == "transferencias":
             if (
                 row_dict.get("fecha") in (None, "", "NaT")
@@ -210,6 +215,7 @@ def guardar_cambios(df_edit_full, ids_originales, modo, ids_marcados_borrar=None
             ):
                 continue
         else:
+            # gastos / ingresos: saltamos filas totalmente vacías
             if (
                 row_dict.get("fecha") in (None, "", "NaT")
                 and not row_dict.get("categoria")
@@ -218,24 +224,36 @@ def guardar_cambios(df_edit_full, ids_originales, modo, ids_marcados_borrar=None
             ):
                 continue
 
+        # Normalizar fecha
         row_dict["fecha"] = normalizar_fecha(row_dict.get("fecha"))
 
+        # Importe seguro
         try:
             row_dict["importe"] = float(row_dict.get("importe") or 0)
         except Exception:
             row_dict["importe"] = 0.0
 
+        # Ajustes según modo
         if modo in ("gastos", "ingresos"):
             row_dict["cuenta_destino"] = None
         elif modo == "transferencias":
             row_dict["categoria"] = row_dict.get("categoria") or "Transferencia"
 
-        data = {col: row_dict.get(col, None) for col in DB_COLUMNS}
+        # Construimos el diccionario final SIN NaN / NaT
+        data = {}
+        for col in DB_COLUMNS:
+            v = row_dict.get(col, None)
+            # pd.isna() detecta NaN, NaT, pd.NA, etc.
+            if _pd.isna(v):
+                v = None
+            data[col] = v
 
-        if row_id and pd.notna(row_id):
+        # Update o insert
+        if row_id and _pd.notna(row_id):
             update_movimiento(row_id, data)
         else:
             insert_movimiento(data)
+
 
 
 # ---------- EXPORTAR ----------
