@@ -55,6 +55,26 @@ CATS_INGRESOS = [
 
 DB_COLUMNS = ["fecha", "descripcion", "categoria", "cuenta", "cuenta_destino", "importe"]
 
+# Meses con nombres
+MESES_NOMBRES = {
+    1: "Enero",
+    2: "Febrero",
+    3: "Marzo",
+    4: "Abril",
+    5: "Mayo",
+    6: "Junio",
+    7: "Julio",
+    8: "Agosto",
+    9: "Septiembre",
+    10: "Octubre",
+    11: "Noviembre",
+    12: "Diciembre",
+}
+
+
+def nombre_mes(m):
+    return MESES_NOMBRES.get(m, str(m))
+
 
 # ---------- FUNCIONES SUPABASE ----------
 def get_table(table):
@@ -76,7 +96,6 @@ def get_movimientos():
 def insert_movimiento(data):
     url = f"{BASE_URL}/{TABLE_MOV}"
     r = requests.post(url, headers=HEADERS, json=data)
-    # En vez de hacer raise_for_status directamente, mostramos el mensaje de Supabase
     if r.status_code >= 400:
         st.error(f"Error al insertar en Supabase ({r.status_code}): {r.text}")
         return None
@@ -101,7 +120,6 @@ def delete_movimiento(row_id):
         st.error(f"Error al borrar en Supabase ({r.status_code}): {r.text}")
         return False
     return True
-
 
 
 def update_saldo_inicial(cuenta, saldo):
@@ -275,13 +293,11 @@ def guardar_cambios(df_edit_full, ids_originales, modo, ids_marcados_borrar=None
             insert_movimiento(data)
 
 
-
-
 # ---------- EXPORTAR ----------
 def df_to_excel_bytes(df, sheet_name="Datos"):
     output = io.BytesIO()
     try:
-        with pd.ExcelWriter(output) as writer:  # engine auto (openpyxl/xlsxwriter)
+        with pd.ExcelWriter(output) as writer:
             df.to_excel(writer, index=False, sheet_name=sheet_name)
         output.seek(0)
         return output
@@ -353,14 +369,24 @@ with tab_gastos:
 
     if modo_movil:
         anio_g = st.selectbox("Año", anios_disponibles, key="anio_g_m")
-        mes_g = st.selectbox("Mes", ["Todos"] + meses_disponibles, key="mes_g_m")
+        mes_g = st.selectbox(
+            "Mes",
+            ["Todos"] + meses_disponibles,
+            key="mes_g_m",
+            format_func=lambda x: "Todos" if x == "Todos" else nombre_mes(x),
+        )
         texto_g = st.text_input("Buscar en descripción", key="busca_g_m")
     else:
         col_f1, col_f2, col_f3 = st.columns(3)
         with col_f1:
             anio_g = st.selectbox("Año", anios_disponibles, key="anio_g")
         with col_f2:
-            mes_g = st.selectbox("Mes", ["Todos"] + meses_disponibles, key="mes_g")
+            mes_g = st.selectbox(
+                "Mes",
+                ["Todos"] + meses_disponibles,
+                key="mes_g",
+                format_func=lambda x: "Todos" if x == "Todos" else nombre_mes(x),
+            )
         with col_f3:
             texto_g = st.text_input("Buscar en descripción", key="busca_g")
 
@@ -431,24 +457,26 @@ with tab_gastos:
 
     col_e1, col_e2 = st.columns(2)
     with col_e1:
+        mes_nombre_g = "todos" if mes_g == "Todos" else nombre_mes(mes_g).lower()
         excel_bytes = df_to_excel_bytes(export_g, sheet_name="Gastos")
         if excel_bytes:
             st.download_button(
                 "⬇️ Exportar gastos a Excel",
                 data=excel_bytes,
-                file_name=f"gastos_{anio_g}_{mes_g if mes_g!='Todos' else 'todos'}.xlsx",
+                file_name=f"gastos_{anio_g}_{mes_nombre_g}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
         else:
             st.caption("Para exportar a Excel, instala 'openpyxl' o 'xlsxwriter' en el entorno de Streamlit.")
 
     with col_e2:
+        mes_nombre_g = "todos" if mes_g == "Todos" else nombre_mes(mes_g).lower()
         pdf_bytes = df_to_pdf_bytes(export_g, title="Gastos filtrados")
         if pdf_bytes:
             st.download_button(
                 "⬇️ Exportar gastos a PDF",
                 data=pdf_bytes,
-                file_name=f"gastos_{anio_g}_{mes_g if mes_g!='Todos' else 'todos'}.pdf",
+                file_name=f"gastos_{anio_g}_{mes_nombre_g}.pdf",
                 mime="application/pdf",
             )
         else:
@@ -461,14 +489,24 @@ with tab_ingresos:
 
     if modo_movil:
         anio_i = st.selectbox("Año", anios_disponibles, key="anio_i_m")
-        mes_i = st.selectbox("Mes", ["Todos"] + meses_disponibles, key="mes_i_m")
+        mes_i = st.selectbox(
+            "Mes",
+            ["Todos"] + meses_disponibles,
+            key="mes_i_m",
+            format_func=lambda x: "Todos" if x == "Todos" else nombre_mes(x),
+        )
         texto_i = st.text_input("Buscar en descripción", key="busca_i_m")
     else:
         col_f1, col_f2, col_f3 = st.columns(3)
         with col_f1:
             anio_i = st.selectbox("Año", anios_disponibles, key="anio_i")
         with col_f2:
-            mes_i = st.selectbox("Mes", ["Todos"] + meses_disponibles, key="mes_i")
+            mes_i = st.selectbox(
+                "Mes",
+                ["Todos"] + meses_disponibles,
+                key="mes_i",
+                format_func=lambda x: "Todos" if x == "Todos" else nombre_mes(x),
+            )
         with col_f3:
             texto_i = st.text_input("Buscar en descripción", key="busca_i")
 
@@ -539,24 +577,26 @@ with tab_ingresos:
 
     col_e1, col_e2 = st.columns(2)
     with col_e1:
+        mes_nombre_i = "todos" if mes_i == "Todos" else nombre_mes(mes_i).lower()
         excel_bytes_i = df_to_excel_bytes(export_i, sheet_name="Ingresos")
         if excel_bytes_i:
             st.download_button(
                 "⬇️ Exportar ingresos a Excel",
                 data=excel_bytes_i,
-                file_name=f"ingresos_{anio_i}_{mes_i if mes_i!='Todos' else 'todos'}.xlsx",
+                file_name=f"ingresos_{anio_i}_{mes_nombre_i}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
         else:
             st.caption("Para exportar a Excel, instala 'openpyxl' o 'xlsxwriter' en el entorno de Streamlit.")
 
     with col_e2:
+        mes_nombre_i = "todos" if mes_i == "Todos" else nombre_mes(mes_i).lower()
         pdf_bytes_i = df_to_pdf_bytes(export_i, title="Ingresos filtrados")
         if pdf_bytes_i:
             st.download_button(
                 "⬇️ Exportar ingresos a PDF",
                 data=pdf_bytes_i,
-                file_name=f"ingresos_{anio_i}_{mes_i if mes_i!='Todos' else 'todos'}.pdf",
+                file_name=f"ingresos_{anio_i}_{mes_nombre_i}.pdf",
                 mime="application/pdf",
             )
         else:
@@ -569,14 +609,24 @@ with tab_transf:
 
     if modo_movil:
         anio_t = st.selectbox("Año", anios_disponibles, key="anio_t_m")
-        mes_t = st.selectbox("Mes", ["Todos"] + meses_disponibles, key="mes_t_m")
+        mes_t = st.selectbox(
+            "Mes",
+            ["Todos"] + meses_disponibles,
+            key="mes_t_m",
+            format_func=lambda x: "Todos" if x == "Todos" else nombre_mes(x),
+        )
         texto_t = st.text_input("Buscar en descripción", key="busca_t_m")
     else:
         col_f1, col_f2, col_f3 = st.columns(3)
         with col_f1:
             anio_t = st.selectbox("Año", anios_disponibles, key="anio_t")
         with col_f2:
-            mes_t = st.selectbox("Mes", ["Todos"] + meses_disponibles, key="mes_t")
+            mes_t = st.selectbox(
+                "Mes",
+                ["Todos"] + meses_disponibles,
+                key="mes_t",
+                format_func=lambda x: "Todos" if x == "Todos" else nombre_mes(x),
+            )
         with col_f3:
             texto_t = st.text_input("Buscar en descripción", key="busca_t")
 
@@ -644,24 +694,26 @@ with tab_transf:
 
     col_e1, col_e2 = st.columns(2)
     with col_e1:
+        mes_nombre_t = "todos" if mes_t == "Todos" else nombre_mes(mes_t).lower()
         excel_bytes_t = df_to_excel_bytes(export_t, sheet_name="Transferencias")
         if excel_bytes_t:
             st.download_button(
                 "⬇️ Exportar transferencias a Excel",
                 data=excel_bytes_t,
-                file_name=f"transferencias_{anio_t}_{mes_t if mes_t!='Todos' else 'todos'}.xlsx",
+                file_name=f"transferencias_{anio_t}_{mes_nombre_t}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
         else:
             st.caption("Para exportar a Excel, instala 'openpyxl' o 'xlsxwriter' en el entorno de Streamlit.")
 
     with col_e2:
+        mes_nombre_t = "todos" if mes_t == "Todos" else nombre_mes(mes_t).lower()
         pdf_bytes_t = df_to_pdf_bytes(export_t, title="Transferencias filtradas")
         if pdf_bytes_t:
             st.download_button(
                 "⬇️ Exportar transferencias a PDF",
                 data=pdf_bytes_t,
-                file_name=f"transferencias_{anio_t}_{mes_t if mes_t!='Todos' else 'todos'}.pdf",
+                file_name=f"transferencias_{anio_t}_{mes_nombre_t}.pdf",
                 mime="application/pdf",
             )
         else:
@@ -680,6 +732,7 @@ with tab_balances:
         options=meses_disponibles,
         default=meses_disponibles,
         key="meses_bal",
+        format_func=nombre_mes,
     )
 
     df_b = df_base[(df_base["anio"] == anio_b) & (df_base["mes"].isin(meses_sel_bal))].copy()
@@ -710,17 +763,22 @@ with tab_balances:
         with c3:
             st.metric("Ahorro (meses seleccionados)", f"{ahorro_anual:,.2f} €")
 
-    # Serie mensual (periodo YYYY-MM)
+    # Serie mensual (periodo Mes Año)
     data_mes = []
     for m in sorted(meses_sel_bal):
         gi = df_i_b[df_i_b["mes"] == m]["importe"].sum()
         gg = df_g_b[df_g_b["mes"] == m]["importe"].sum()
         data_mes.append({
-            "periodo": f"{anio_b}-{m:02d}",
+            "periodo": f"{nombre_mes(m)} {anio_b}",
             "Ingresos": gi,
             "Gastos": gg,
             "Ahorro": gi - gg,
         })
+
+    if data_mes:
+        df_mes = pd.DataFrame(data_mes).set_index("periodo")
+        st.markdown("**Evolución mensual (Ingresos, Gastos, Ahorro)**")
+        st.line_chart(df_mes)
 
     st.markdown("**Saldos por cuenta (hasta el final del año seleccionado)**")
 
@@ -739,7 +797,7 @@ with tab_balances:
             st.dataframe(df_saldos, use_container_width=True)
         with col_s2:
             st.bar_chart(df_saldos.set_index("Cuenta")["Saldo"])
-            
+
     st.markdown("---")
 
     if modo_movil:
@@ -774,8 +832,6 @@ with tab_balances:
                 st.info("No hay ingresos para el filtro seleccionado.")
 
 
-
-
 # ---------- TAB HISTÓRICO COMPLETO ----------
 with tab_hist:
     st.subheader("📚 Histórico completo de movimientos")
@@ -784,7 +840,12 @@ with tab_hist:
     with colh1:
         anio_h = st.selectbox("Año", ["Todos"] + list(anios_disponibles), key="anio_hist")
     with colh2:
-        mes_h = st.selectbox("Mes", ["Todos"] + meses_disponibles, key="mes_hist")
+        mes_h = st.selectbox(
+            "Mes",
+            ["Todos"] + meses_disponibles,
+            key="mes_hist",
+            format_func=lambda x: "Todos" if x == "Todos" else nombre_mes(x),
+        )
     with colh3:
         texto_h = st.text_input("Buscar", key="busca_hist", placeholder="Descripción, categoría, cuenta...")
 
@@ -822,7 +883,7 @@ with tab_hist:
         st.download_button(
             "⬇️ Exportar histórico a Excel",
             data=excel_bytes_h,
-            file_name=f"historico.xlsx",
+            file_name="historico.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
     else:
@@ -837,7 +898,7 @@ with tab_hist:
             mime="application/pdf",
         )
     else:
-        st.caption("Para exportar histórico a PDF, instala 'reportlab' en el entorno de Streamlit.")
+        st.caption("Para exportar a PDF, instala 'reportlab' en el entorno de Streamlit.")
 
 
 # ---------- TAB CONFIGURACIÓN ----------
