@@ -722,6 +722,26 @@ with tab_balances:
             "Ahorro": gi - gg,
         })
 
+    st.markdown("**Saldos por cuenta (hasta el final del año seleccionado)**")
+
+    df_saldos_base = df_base[df_base["anio"] <= anio_b].copy()
+    saldos = calcular_saldos_por_cuenta(df_saldos_base)
+    df_saldos = pd.DataFrame(
+        [{"Cuenta": c, "Saldo": sal} for c, sal in saldos.items()]
+    )
+
+    if modo_movil:
+        st.dataframe(df_saldos, use_container_width=True)
+        st.bar_chart(df_saldos.set_index("Cuenta")["Saldo"])
+    else:
+        col_s1, col_s2 = st.columns([2, 1])
+        with col_s1:
+            st.dataframe(df_saldos, use_container_width=True)
+        with col_s2:
+            st.bar_chart(df_saldos.set_index("Cuenta")["Saldo"])
+            
+    st.markdown("---")
+
     if modo_movil:
         st.markdown("**Gasto por categoría**")
         if not df_g_b.empty:
@@ -753,24 +773,7 @@ with tab_balances:
             else:
                 st.info("No hay ingresos para el filtro seleccionado.")
 
-    st.markdown("---")
-    st.markdown("**Saldos por cuenta (hasta el final del año seleccionado)**")
 
-    df_saldos_base = df_base[df_base["anio"] <= anio_b].copy()
-    saldos = calcular_saldos_por_cuenta(df_saldos_base)
-    df_saldos = pd.DataFrame(
-        [{"Cuenta": c, "Saldo": sal} for c, sal in saldos.items()]
-    )
-
-    if modo_movil:
-        st.dataframe(df_saldos, use_container_width=True)
-        st.bar_chart(df_saldos.set_index("Cuenta")["Saldo"])
-    else:
-        col_s1, col_s2 = st.columns([2, 1])
-        with col_s1:
-            st.dataframe(df_saldos, use_container_width=True)
-        with col_s2:
-            st.bar_chart(df_saldos.set_index("Cuenta")["Saldo"])
 
 
 # ---------- TAB HISTÓRICO COMPLETO ----------
