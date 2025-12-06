@@ -775,10 +775,6 @@ with tab_balances:
             "Ahorro": gi - gg,
         })
 
-    if data_mes:
-        df_mes = pd.DataFrame(data_mes).set_index("periodo")
-        st.markdown("**Evolución mensual (Ingresos, Gastos, Ahorro)**")
-        st.line_chart(df_mes)
 
     st.markdown("**Saldos por cuenta (hasta el final del año seleccionado)**")
 
