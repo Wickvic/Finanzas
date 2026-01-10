@@ -382,32 +382,42 @@ def df_to_pdf_bytes(df, title="Datos"):
 
 # ---------- Editor helpers (ID oculto sin columna visible) ----------
 def build_editor_df(df_src: pd.DataFrame, visible_cols: List[str], default_cuenta: str) -> pd.DataFrame:
+    """
+    Devuelve un df para st.data_editor:
+    - NO muestra id
+    - usa __row_id como índice oculto
+    - filas nuevas usan __new__... para evitar índices duplicados
+    """
     dfv = df_src.copy()
 
+    # Asegurar columnas
     for c in ["id"] + visible_cols:
         if c not in dfv.columns:
             dfv[c] = None
 
     dfv = dfv[["id"] + visible_cols].copy()
-
-    if "importe" in dfv.columns:
-        dfv["importe"] = dfv["importe"].apply(lambda x: "" if pd.isna(x) else str(x))
+    dfv["importe"] = dfv["importe"].apply(lambda x: "" if pd.isna(x) else str(x))
 
     dfv["🗑 Eliminar"] = False
 
-    # defaults (solo si existe 'cuenta')
-    if "cuenta" in dfv.columns:
-        dfv = aplicar_defaults_df_editor(dfv, default_cuenta=default_cuenta)
+    # defaults (sobre vista con range index)
+    dfv = aplicar_defaults_df_editor(dfv, default_cuenta=default_cuenta)
 
-    # id real oculto (clave del guardado)
-    dfv["__id"] = dfv["id"].fillna("").astype(str)
+    # índice oculto estable
+    dfv["id"] = dfv["id"].fillna("").astype(str)
+    row_ids = []
+    for i, rid in enumerate(dfv["id"].tolist()):
+        if rid.strip():
+            row_ids.append(rid.strip())
+        else:
+            row_ids.append(f"__new__{i}_{uuid.uuid4().hex[:8]}")
+    dfv["__row_id"] = row_ids
+
+    # quitamos id visible
     dfv = dfv.drop(columns=["id"])
-
-    # índice artificial
-    dfv.index = [f"row_{i}" for i in range(len(dfv))]
-    dfv.index.name = ""
+    dfv = dfv.set_index("__row_id")
+    dfv.index.name = ""  # evita el título del índice
     return dfv
-
 
 def add_duplicate_last_row(df_editor: pd.DataFrame, cols_to_dup: List[str]) -> pd.DataFrame:
     """
@@ -444,20 +454,21 @@ def add_duplicate_last_row(df_editor: pd.DataFrame, cols_to_dup: List[str]) -> p
     return tmp
 
 # ---------- PREPARAR PAYLOAD (split upsert/insert) ----------
-def validar_y_preparar_payload_desde_editor(df_edit: pd.DataFrame, modo: str):
+def validar_y_preparar_payload_desde_editor(df_edit: pd.DataFrame, modo: str) -> Tuple[List[str], List[dict], List[dict], List[str]]:
     ids_borrar = []
     rows_upsert = []
     rows_insert = []
     avisos = []
 
-    for _, r in df_edit.iterrows():
-        # __id debe venir siempre; si no viene, fallback a vacío (fila nueva)
-        rid = safe_str(r.get("__id", "")).strip()
-        es_nueva = (rid == "")
+    # índice oculto = id real si no empieza por __new__
+    for ridx, r in df_edit.iterrows():
+        rid = str(ridx).strip() if ridx is not None else ""
 
         eliminar = bool(r.get("🗑 Eliminar", False))
+        es_nueva = (not rid) or rid.startswith("__new__")
+
         if eliminar:
-            if not es_nueva:
+            if (not es_nueva) and rid:
                 ids_borrar.append(rid)
             continue
 
@@ -470,7 +481,6 @@ def validar_y_preparar_payload_desde_editor(df_edit: pd.DataFrame, modo: str):
             continue
 
         desc = safe_str(r.get("descripcion")).strip()
-
         cuenta = sanitize_choice(r.get("cuenta"), CUENTAS)
         if not cuenta:
             avisos.append("Cuenta inválida o vacía.")
@@ -503,7 +513,7 @@ def validar_y_preparar_payload_desde_editor(df_edit: pd.DataFrame, modo: str):
             payload["categoria"] = "Transferencia"
             payload["cuenta_destino"] = cuenta_destino
 
-        if not es_nueva:
+        if (not es_nueva) and rid:
             payload_up = dict(payload)
             payload_up["id"] = rid
             rows_upsert.append(payload_up)
@@ -511,7 +521,6 @@ def validar_y_preparar_payload_desde_editor(df_edit: pd.DataFrame, modo: str):
             rows_insert.append(payload)
 
     return ids_borrar, rows_upsert, rows_insert, avisos
-
 
 def total_importe_col(df_edit, col="importe"):
     return sum(float(parse_importe(x) or 0) for x in df_edit[col].tolist())
@@ -691,7 +700,6 @@ with tab_gastos:
         use_container_width=True,
         key="editor_gastos",
         column_config={
-            "__id": st.column_config.TextColumn("", disabled=True, width="small"),
             "fecha": st.column_config.DateColumn("Fecha", format=DATE_FORMAT),
             "descripcion": st.column_config.TextColumn("Descripción"),
             "categoria": st.column_config.SelectboxColumn("Categoría", options=CATS_GASTOS),
@@ -746,7 +754,6 @@ with tab_ingresos:
         use_container_width=True,
         key="editor_ingresos",
         column_config={
-            "__id": st.column_config.TextColumn("", disabled=True, width="small"),
             "fecha": st.column_config.DateColumn("Fecha", format=DATE_FORMAT),
             "descripcion": st.column_config.TextColumn("Descripción"),
             "categoria": st.column_config.SelectboxColumn("Categoría", options=CATS_INGRESOS),
@@ -799,7 +806,6 @@ with tab_transf:
         use_container_width=True,
         key="editor_transf",
         column_config={
-            "__id": st.column_config.TextColumn("", disabled=True, width="small"),
             "fecha": st.column_config.DateColumn("Fecha", format=DATE_FORMAT),
             "descripcion": st.column_config.TextColumn("Descripción"),
             "cuenta": st.column_config.SelectboxColumn("Cuenta origen", options=CUENTAS),
