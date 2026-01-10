@@ -3,6 +3,10 @@ import pandas as pd
 import requests
 from datetime import date
 import io
+import uuid
+import json
+import hashlib
+from typing import List, Tuple, Optional
 
 # ---------- PDF (reportlab) ----------
 try:
@@ -11,6 +15,31 @@ try:
     REPORTLAB_AVAILABLE = True
 except ImportError:
     REPORTLAB_AVAILABLE = False
+
+# ---------- REQUESTS: Session + retries ----------
+def build_session():
+    s = requests.Session()
+    try:
+        from urllib3.util.retry import Retry
+        from requests.adapters import HTTPAdapter
+
+        retry = Retry(
+            total=3,
+            backoff_factor=0.4,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["GET", "POST", "PATCH", "DELETE"],
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(max_retries=retry)
+        s.mount("https://", adapter)
+        s.mount("http://", adapter)
+    except Exception:
+        # Si urllib3/Retry no está disponible por lo que sea, seguimos sin reintentos.
+        pass
+    return s
+
+SESSION = build_session()
+TIMEOUT = 15
 
 # ---------- CONFIG SUPABASE ----------
 SUPABASE_URL = st.secrets["SUPABASE_URL"].rstrip("/")
@@ -73,7 +102,7 @@ def nombre_mes(m):
     return MESES_NOMBRES.get(m, str(m))
 
 
-# ---------- UTIL: coma/punto ----------
+# ---------- UTIL: coma/punto + normalización ----------
 def parse_importe(v):
     if v is None:
         return None
@@ -83,8 +112,10 @@ def parse_importe(v):
         s = v.strip().replace(" ", "")
         if s == "":
             return None
+        # 1.234,56 -> 1234.56
         if "," in s and "." in s:
             s = s.replace(".", "").replace(",", ".")
+        # 12,34 -> 12.34
         elif "," in s and "." not in s:
             s = s.replace(",", ".")
         try:
@@ -104,30 +135,73 @@ def normalizar_fecha(valor):
     return valor
 
 
-# ---------- SUPABASE ----------
-def get_table(table):
+def safe_str(x) -> str:
+    return "" if x is None else str(x)
+
+
+def sanitize_choice(value: str, options: List[str]) -> Optional[str]:
+    v = safe_str(value).strip()
+    if not v:
+        return None
+    return v if v in options else None
+
+
+def short_json(obj, max_chars=2000):
+    s = json.dumps(obj, ensure_ascii=False, indent=2, default=str)
+    if len(s) > max_chars:
+        return s[:max_chars] + "\n... (truncado)"
+    return s
+
+
+# ---------- Debug / error helper ----------
+def show_http_error(action: str, r: requests.Response, sample_payload=None):
+    st.error(f"{action} ERROR: {r.status_code}")
+    try:
+        st.code(r.text[:4000])
+    except Exception:
+        st.code("<sin cuerpo>")
+    if sample_payload is not None:
+        st.caption("Payload (muestra):")
+        st.code(short_json(sample_payload, 2500))
+
+
+# ---------- SUPABASE (cacheadas) ----------
+@st.cache_data(ttl=10)
+def get_table_cached(table: str):
     url = f"{BASE_URL}/{table}"
-    r = requests.get(url, headers=HEADERS, params={"select": "*"}, timeout=30)
+    r = SESSION.get(url, headers=HEADERS, params={"select": "*"}, timeout=TIMEOUT)
     r.raise_for_status()
     return r.json()
 
 
-def get_movimientos():
+@st.cache_data(ttl=10)
+def get_movimientos_cached():
     url = f"{BASE_URL}/{TABLE_MOV}"
-    r = requests.get(url, headers=HEADERS, params={"select": "*", "order": "fecha.asc"}, timeout=30)
+    r = SESSION.get(url, headers=HEADERS, params={"select": "*", "order": "fecha.asc"}, timeout=TIMEOUT)
     r.raise_for_status()
     return r.json()
 
 
-def insert_movimientos_bulk(rows):
-    """INSERT: filas nuevas SIN id (si tu tabla genera id)."""
+def cache_clear_all():
+    try:
+        st.cache_data.clear()
+    except Exception:
+        pass
+
+
+def insert_movimientos_bulk(rows, generar_uuid: bool):
+    """INSERT: filas nuevas. Si id en tu tabla no tiene default, ponemos UUID."""
     if not rows:
         return []
+
+    if generar_uuid:
+        for row in rows:
+            row.setdefault("id", str(uuid.uuid4()))
+
     url = f"{BASE_URL}/{TABLE_MOV}"
-    r = requests.post(url, headers=HEADERS, json=rows, timeout=30)
+    r = SESSION.post(url, headers=HEADERS, json=rows, timeout=TIMEOUT)
     if r.status_code >= 400:
-        st.error(f"INSERT ERROR: {r.status_code}")
-        st.code(r.text)
+        show_http_error("INSERT", r, sample_payload=rows[:3])
         return None
     if not r.text:
         return []
@@ -135,21 +209,20 @@ def insert_movimientos_bulk(rows):
 
 
 def upsert_movimientos_bulk(rows):
-    """UPSERT: solo filas con id (updates)."""
+    """UPSERT: filas con id (updates)."""
     if not rows:
         return []
     url = f"{BASE_URL}/{TABLE_MOV}?on_conflict=id"
-    r = requests.post(url, headers=HEADERS_UPSERT, json=rows, timeout=30)
+    r = SESSION.post(url, headers=HEADERS_UPSERT, json=rows, timeout=TIMEOUT)
     if r.status_code >= 400:
-        st.error(f"UPSERT ERROR: {r.status_code}")
-        st.code(r.text)
+        show_http_error("UPSERT", r, sample_payload=rows[:3])
         return None
     if not r.text:
         return []
     try:
         return r.json()
     except Exception:
-        st.code(r.text)
+        st.code(r.text[:4000])
         return []
 
 
@@ -159,40 +232,38 @@ def delete_movimientos_bulk(ids):
         return True
     url = f"{BASE_URL}/{TABLE_MOV}"
     params = {"id": f"in.({','.join(ids)})"}
-    r = requests.delete(url, headers=HEADERS, params=params, timeout=30)
+    r = SESSION.delete(url, headers=HEADERS, params=params, timeout=TIMEOUT)
     if r.status_code >= 400:
-        st.error(f"DELETE ERROR: {r.status_code}")
-        st.code(r.text)
+        show_http_error("DELETE", r, sample_payload={"ids": ids[:25]})
         return False
     return True
 
 
 def update_saldo_inicial_upsert(cuenta, saldo):
     url = f"{BASE_URL}/{TABLE_SALDOS}"
-    r0 = requests.get(url, headers=HEADERS, params={"select": "*", "cuenta": f"eq.{cuenta}"}, timeout=30)
+    r0 = SESSION.get(url, headers=HEADERS, params={"select": "*", "cuenta": f"eq.{cuenta}"}, timeout=TIMEOUT)
     r0.raise_for_status()
     existe = len(r0.json()) > 0
 
     if existe:
-        r = requests.patch(
+        r = SESSION.patch(
             url, headers=HEADERS, params={"cuenta": f"eq.{cuenta}"},
-            json={"saldo_inicial": float(saldo)}, timeout=30
+            json={"saldo_inicial": float(saldo)}, timeout=TIMEOUT
         )
     else:
-        r = requests.post(
+        r = SESSION.post(
             url, headers=HEADERS,
-            json={"cuenta": cuenta, "saldo_inicial": float(saldo)}, timeout=30
+            json={"cuenta": cuenta, "saldo_inicial": float(saldo)}, timeout=TIMEOUT
         )
 
     if r.status_code >= 400:
-        st.error(f"SALDOS ERROR: {r.status_code}")
-        st.code(r.text)
+        show_http_error("SALDOS", r, sample_payload={"cuenta": cuenta, "saldo": saldo})
         r.raise_for_status()
 
 
 # ---------- DATA ----------
 def preparar_dataframe_base():
-    rows = get_movimientos()
+    rows = get_movimientos_cached()
     df = pd.DataFrame(rows) if rows else pd.DataFrame([])
 
     for col in ["id"] + DB_COLUMNS:
@@ -224,7 +295,7 @@ def preparar_dataframe_base():
 
 def get_saldos_iniciales():
     try:
-        rows = get_table(TABLE_SALDOS)
+        rows = get_table_cached(TABLE_SALDOS)
         if not rows:
             return {c: 0.0 for c in CUENTAS}
         df = pd.DataFrame(rows)
@@ -263,10 +334,6 @@ def calcular_saldos_por_cuenta(df):
 
 # ---------- DEFAULTS EN FILAS NUEVAS ----------
 def aplicar_defaults_df_editor(df_visible, default_cuenta="Principal"):
-    """
-    Si una fila parece 'nueva' (id vacío) y cuenta está vacía, la ponemos a Principal.
-    Esto se ejecuta ANTES de renderizar el editor, que es lo que Streamlit permite.
-    """
     df2 = df_visible.copy()
     if "cuenta" not in df2.columns:
         return df2
@@ -282,31 +349,36 @@ def aplicar_defaults_df_editor(df_visible, default_cuenta="Principal"):
 
 
 # ---------- PREPARAR PAYLOAD (split upsert/insert) ----------
-def validar_y_preparar_payload_desde_editor(df_edit, modo):
+def validar_y_preparar_payload_desde_editor(df_edit, modo) -> Tuple[List[str], List[dict], List[dict], List[str]]:
     ids_borrar = []
     rows_upsert = []   # con id
     rows_insert = []   # sin id
+    avisos = []
 
-    for _, r in df_edit.iterrows():
+    for idx, r in df_edit.iterrows():
         rid = r.get("id", None)
         eliminar = bool(r.get("🗑 Eliminar", False))
 
         if eliminar:
             if pd.notna(rid) and str(rid).strip() != "":
-                ids_borrar.append(rid)
+                ids_borrar.append(str(rid))
             continue
 
         fecha = r.get("fecha")
         if pd.isna(fecha) or fecha in (None, "", "NaT"):
+            # fila incompleta => no se guarda
             continue
 
         imp = parse_importe(r.get("importe"))
         if imp is None or imp == 0:
+            # regla: guardamos solo cuando hay importe válido
             continue
 
-        desc = (r.get("descripcion") or "").strip()
-        cuenta = (r.get("cuenta") or "").strip()
+        desc = safe_str(r.get("descripcion")).strip()
+
+        cuenta = sanitize_choice(r.get("cuenta"), CUENTAS)
         if not cuenta:
+            avisos.append(f"Fila {idx+1}: Cuenta inválida o vacía.")
             continue
 
         payload = {
@@ -317,39 +389,115 @@ def validar_y_preparar_payload_desde_editor(df_edit, modo):
         }
 
         if modo in ("gastos", "ingresos"):
-            categoria = (r.get("categoria") or "").strip()
+            opciones = CATS_GASTOS if modo == "gastos" else CATS_INGRESOS
+            categoria = sanitize_choice(r.get("categoria"), opciones)
             if not categoria:
+                avisos.append(f"Fila {idx+1}: Categoría inválida o vacía.")
                 continue
             payload["categoria"] = categoria
             payload["cuenta_destino"] = None
 
         elif modo == "transferencias":
-            cuenta_destino = (r.get("cuenta_destino") or "").strip()
+            cuenta_destino = sanitize_choice(r.get("cuenta_destino"), CUENTAS)
             if not cuenta_destino:
+                avisos.append(f"Fila {idx+1}: Cuenta destino inválida o vacía.")
+                continue
+            if cuenta_destino == cuenta:
+                avisos.append(f"Fila {idx+1}: Cuenta destino no puede ser igual a origen.")
                 continue
             payload["categoria"] = "Transferencia"
             payload["cuenta_destino"] = cuenta_destino
 
         if pd.notna(rid) and str(rid).strip() != "":
             payload_up = dict(payload)
-            payload_up["id"] = rid
+            payload_up["id"] = str(rid).strip()
             rows_upsert.append(payload_up)
         else:
             rows_insert.append(payload)
 
-    return ids_borrar, rows_upsert, rows_insert
+    return ids_borrar, rows_upsert, rows_insert, avisos
 
 
 def total_importe_col(df_edit, col="importe"):
     return sum(float(parse_importe(x) or 0) for x in df_edit[col].tolist())
 
 
+def df_fingerprint(df: pd.DataFrame, cols: List[str]) -> str:
+    """Hash estable para detectar cambios sin guardar (ignora orden de columnas extra)."""
+    try:
+        sub = df[cols].copy()
+    except Exception:
+        sub = df.copy()
+    sub = sub.fillna("")
+    # normalizamos importes a string tal cual están (para detectar cambios)
+    payload = sub.astype(str).to_dict(orient="records")
+    s = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+
+# ---------- EXPORTAR ----------
+def df_to_excel_bytes(df, sheet_name="Datos"):
+    output = io.BytesIO()
+    try:
+        with pd.ExcelWriter(output) as writer:
+            df.to_excel(writer, index=False, sheet_name=sheet_name)
+        output.seek(0)
+        return output
+    except Exception:
+        return None
+
+
+def df_to_pdf_bytes(df, title="Datos"):
+    if not REPORTLAB_AVAILABLE:
+        return None
+    buffer = io.BytesIO()
+    c = canvas.Canvas(buffer, pagesize=A4)
+    width, height = A4
+    y = height - 40
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(40, y, title)
+    y -= 20
+    c.setFont("Helvetica", 8)
+
+    cols = list(df.columns)
+    x_start = 40
+
+    x = x_start
+    for col in cols:
+        c.drawString(x, y, str(col)[:15])
+        x += 80
+    y -= 15
+
+    for _, row in df.iterrows():
+        x = x_start
+        if y < 40:
+            c.showPage()
+            y = height - 40
+            c.setFont("Helvetica", 8)
+        for col in cols:
+            c.drawString(x, y, str(row[col])[:15])
+            x += 80
+        y -= 12
+
+    c.showPage()
+    c.save()
+    buffer.seek(0)
+    return buffer
+
+
 # ---------- APP ----------
 st.set_page_config(page_title="Finanzas Familiares", layout="wide")
 st.title("Finanzas familiares")
 
+# (8) UI: cuenta por defecto + opción UUID inserts
+default_cuenta = st.sidebar.selectbox("Cuenta por defecto (filas nuevas)", CUENTAS, index=0)
+generar_uuid_inserts = st.sidebar.checkbox("Generar UUID en filas nuevas (recomendado)", value=True)
 modo_movil = st.sidebar.checkbox("📱 Modo móvil compacto", value=False)
-modo_debug = st.sidebar.checkbox("🧪 Modo debug guardado", value=False)
+modo_debug = st.sidebar.checkbox("🧪 Debug", value=False)
+
+# (2) lock anti-doble guardado
+if "saving" not in st.session_state:
+    st.session_state["saving"] = False
 
 try:
     df_base = preparar_dataframe_base()
@@ -392,6 +540,96 @@ def filtros_anio_mes_texto(prefix, modo_movil_local):
         return anio, mes, texto
 
 
+# (5) cambios sin guardar: helper banner
+def unsaved_banner(tab_key: str, df_edit: pd.DataFrame, cols: List[str]):
+    fp = df_fingerprint(df_edit, cols)
+    saved_fp_key = f"{tab_key}_saved_fp"
+    current_fp_key = f"{tab_key}_current_fp"
+    st.session_state[current_fp_key] = fp
+
+    saved_fp = st.session_state.get(saved_fp_key)
+    if saved_fp and saved_fp != fp:
+        st.warning("⚠️ Tienes cambios sin guardar en esta pestaña.")
+    elif not saved_fp:
+        # primera vez: tomamos como “guardado” el estado inicial
+        st.session_state[saved_fp_key] = fp
+
+
+def mark_saved(tab_key: str, df_edit: pd.DataFrame, cols: List[str]):
+    st.session_state[f"{tab_key}_saved_fp"] = df_fingerprint(df_edit, cols)
+
+
+# (8) UI: duplicar última fila útil
+def add_duplicate_last_row(df_visible: pd.DataFrame, cols_to_dup: List[str]) -> pd.DataFrame:
+    df2 = df_visible.copy()
+    if df2.empty:
+        return df2
+    # buscamos última fila con algún dato
+    last_row = None
+    for i in range(len(df2) - 1, -1, -1):
+        row = df2.iloc[i]
+        if any(str(row.get(c, "")).strip() for c in cols_to_dup):
+            last_row = row
+            break
+    if last_row is None:
+        last_row = df2.iloc[-1]
+    new = {c: last_row.get(c, "") for c in df2.columns}
+    # fila nueva => id vacío, no borrar
+    if "id" in new:
+        new["id"] = ""
+    if "🗑 Eliminar" in new:
+        new["🗑 Eliminar"] = False
+    df2 = pd.concat([df2, pd.DataFrame([new])], ignore_index=True)
+    return df2
+
+
+# ---------- GUARDADO ROBUSTO ----------
+def guardar_cambios_robusto(tab_key: str, df_edit: pd.DataFrame, modo: str, cols_fingerprint: List[str]):
+    if st.session_state["saving"]:
+        st.info("Guardando…")
+        return
+
+    st.session_state["saving"] = True
+    try:
+        ids_borrar, rows_upsert, rows_insert, avisos = validar_y_preparar_payload_desde_editor(df_edit, modo=modo)
+
+        if avisos:
+            for a in avisos[:10]:
+                st.warning(a)
+            if len(avisos) > 10:
+                st.caption(f"... +{len(avisos)-10} avisos más")
+
+        if modo_debug:
+            st.write("IDs a borrar:", ids_borrar)
+            st.write("Upserts:", len(rows_upsert), "Inserts:", len(rows_insert))
+            st.json({"upsert_sample": rows_upsert[:3], "insert_sample": rows_insert[:3]})
+
+        # (1) Orden seguro: primero INSERT/UPSERT; luego DELETE
+        res_in = insert_movimientos_bulk(rows_insert, generar_uuid=generar_uuid_inserts)
+        if res_in is None:
+            st.error("No se pudo guardar (falló INSERT). No se ha borrado nada.")
+            return
+
+        res_up = upsert_movimientos_bulk(rows_upsert)
+        if res_up is None:
+            st.error("No se pudo guardar (falló UPSERT). No se ha borrado nada.")
+            return
+
+        ok_del = delete_movimientos_bulk(ids_borrar)
+        if not ok_del:
+            st.error("Guardado parcial: se insertó/actualizó, pero falló el borrado.")
+        else:
+            st.success(f"Guardado ✅ (inserts: {len(res_in)} | updates: {len(res_up)} | borrados: {len(ids_borrar)})")
+
+        # (7) clear cache + refrescar
+        cache_clear_all()
+        mark_saved(tab_key, df_edit, cols_fingerprint)
+        st.rerun()
+
+    finally:
+        st.session_state["saving"] = False
+
+
 # ---------- TAB GASTOS ----------
 with tab_gastos:
     st.subheader("Gastos")
@@ -413,16 +651,21 @@ with tab_gastos:
             "fecha": None,
             "descripcion": "",
             "categoria": "",
-            "cuenta": "Principal",
+            "cuenta": default_cuenta,
             "cuenta_destino": None,
             "importe": "",
         }])
 
-    visible = ["id", "fecha", "descripcion", "categoria", "cuenta", "importe"]
-    df_g_visible = df_g[visible].copy()
+    visible_cols = ["id", "fecha", "descripcion", "categoria", "cuenta", "importe"]
+    df_g_visible = df_g[visible_cols].copy()
     df_g_visible["importe"] = df_g_visible["importe"].apply(lambda x: "" if pd.isna(x) else str(x))
     df_g_visible["🗑 Eliminar"] = False
-    df_g_visible = aplicar_defaults_df_editor(df_g_visible, default_cuenta="Principal")
+    df_g_visible = aplicar_defaults_df_editor(df_g_visible, default_cuenta=default_cuenta)
+
+    ctop1, ctop2 = st.columns([1, 3])
+    with ctop1:
+        if st.button("➕ Duplicar última fila", key="dup_g"):
+            df_g_visible = add_duplicate_last_row(df_g_visible, cols_to_dup=["fecha", "descripcion", "categoria", "cuenta", "importe"])
 
     df_g_edit = st.data_editor(
         df_g_visible,
@@ -440,24 +683,21 @@ with tab_gastos:
         },
     )
 
+    unsaved_banner("gastos", df_g_edit, cols_fingerprint=["id", "fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"])
     st.metric("Total gastos (vista actual)", f"{total_importe_col(df_g_edit):,.2f} €")
 
-    if st.button("💾 Guardar cambios (Gastos)", key="save_gastos"):
-        ids_borrar, rows_upsert, rows_insert = validar_y_preparar_payload_desde_editor(df_g_edit, modo="gastos")
-        if modo_debug:
-            st.write("IDs a borrar:", ids_borrar)
-            st.write("Upserts:", len(rows_upsert), "Inserts:", len(rows_insert))
-            st.json({"upsert": rows_upsert[:5], "insert": rows_insert[:5]})
-
-        delete_movimientos_bulk(ids_borrar)
-        res_up = upsert_movimientos_bulk(rows_upsert)
-        res_in = insert_movimientos_bulk(rows_insert)
-
-        if (res_up is None) or (res_in is None):
-            st.error("No se pudo guardar (mira el error arriba).")
-        else:
-            st.success(f"Guardado ✅ (updates: {len(res_up)} | inserts: {len(res_in)})")
-            st.rerun()
+    st.button(
+        "💾 Guardar cambios",
+        key="save_gastos",
+        disabled=st.session_state["saving"],
+        on_click=lambda: None,
+    )
+    if st.session_state.get("save_gastos"):
+        # streamlit “toggle” rara: lo tratamos como click normal leyendo el retorno no es fiable.
+        # Mejor: usamos un botón real con if. Pero para mantenerlo simple, repetimos:
+        pass
+    if st.button("💾 Guardar cambios", key="save_gastos_real", disabled=st.session_state["saving"]):
+        guardar_cambios_robusto("gastos", df_g_edit, modo="gastos", cols_fingerprint=["id", "fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"])
 
 
 # ---------- TAB INGRESOS ----------
@@ -481,16 +721,19 @@ with tab_ingresos:
             "fecha": None,
             "descripcion": "",
             "categoria": "",
-            "cuenta": "Principal",
+            "cuenta": default_cuenta,
             "cuenta_destino": None,
             "importe": "",
         }])
 
-    visible = ["id", "fecha", "descripcion", "categoria", "cuenta", "importe"]
-    df_i_visible = df_i[visible].copy()
+    visible_cols = ["id", "fecha", "descripcion", "categoria", "cuenta", "importe"]
+    df_i_visible = df_i[visible_cols].copy()
     df_i_visible["importe"] = df_i_visible["importe"].apply(lambda x: "" if pd.isna(x) else str(x))
     df_i_visible["🗑 Eliminar"] = False
-    df_i_visible = aplicar_defaults_df_editor(df_i_visible, default_cuenta="Principal")
+    df_i_visible = aplicar_defaults_df_editor(df_i_visible, default_cuenta=default_cuenta)
+
+    if st.button("➕ Duplicar última fila", key="dup_i"):
+        df_i_visible = add_duplicate_last_row(df_i_visible, cols_to_dup=["fecha", "descripcion", "categoria", "cuenta", "importe"])
 
     df_i_edit = st.data_editor(
         df_i_visible,
@@ -508,24 +751,11 @@ with tab_ingresos:
         },
     )
 
+    unsaved_banner("ingresos", df_i_edit, cols_fingerprint=["id", "fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"])
     st.metric("Total ingresos (vista actual)", f"{total_importe_col(df_i_edit):,.2f} €")
 
-    if st.button("💾 Guardar cambios (Ingresos)", key="save_ingresos"):
-        ids_borrar, rows_upsert, rows_insert = validar_y_preparar_payload_desde_editor(df_i_edit, modo="ingresos")
-        if modo_debug:
-            st.write("IDs a borrar:", ids_borrar)
-            st.write("Upserts:", len(rows_upsert), "Inserts:", len(rows_insert))
-            st.json({"upsert": rows_upsert[:5], "insert": rows_insert[:5]})
-
-        delete_movimientos_bulk(ids_borrar)
-        res_up = upsert_movimientos_bulk(rows_upsert)
-        res_in = insert_movimientos_bulk(rows_insert)
-
-        if (res_up is None) or (res_in is None):
-            st.error("No se pudo guardar (mira el error arriba).")
-        else:
-            st.success(f"Guardado ✅ (updates: {len(res_up)} | inserts: {len(res_in)})")
-            st.rerun()
+    if st.button("💾 Guardar cambios", key="save_ingresos_real", disabled=st.session_state["saving"]):
+        guardar_cambios_robusto("ingresos", df_i_edit, modo="ingresos", cols_fingerprint=["id", "fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"])
 
 
 # ---------- TAB TRANSFERENCIAS ----------
@@ -548,16 +778,19 @@ with tab_transf:
             "fecha": None,
             "descripcion": "",
             "categoria": "Transferencia",
-            "cuenta": "Principal",
+            "cuenta": default_cuenta,
             "cuenta_destino": "",
             "importe": "",
         }])
 
-    visible = ["id", "fecha", "descripcion", "cuenta", "cuenta_destino", "importe"]
-    df_t_visible = df_t[visible].copy()
+    visible_cols = ["id", "fecha", "descripcion", "cuenta", "cuenta_destino", "importe"]
+    df_t_visible = df_t[visible_cols].copy()
     df_t_visible["importe"] = df_t_visible["importe"].apply(lambda x: "" if pd.isna(x) else str(x))
     df_t_visible["🗑 Eliminar"] = False
-    df_t_visible = aplicar_defaults_df_editor(df_t_visible, default_cuenta="Principal")
+    df_t_visible = aplicar_defaults_df_editor(df_t_visible, default_cuenta=default_cuenta)
+
+    if st.button("➕ Duplicar última fila", key="dup_t"):
+        df_t_visible = add_duplicate_last_row(df_t_visible, cols_to_dup=["fecha", "descripcion", "cuenta", "cuenta_destino", "importe"])
 
     df_t_edit = st.data_editor(
         df_t_visible,
@@ -575,22 +808,10 @@ with tab_transf:
         },
     )
 
-    if st.button("💾 Guardar cambios (Transferencias)", key="save_transf"):
-        ids_borrar, rows_upsert, rows_insert = validar_y_preparar_payload_desde_editor(df_t_edit, modo="transferencias")
-        if modo_debug:
-            st.write("IDs a borrar:", ids_borrar)
-            st.write("Upserts:", len(rows_upsert), "Inserts:", len(rows_insert))
-            st.json({"upsert": rows_upsert[:5], "insert": rows_insert[:5]})
+    unsaved_banner("transf", df_t_edit, cols_fingerprint=["id", "fecha", "descripcion", "cuenta", "cuenta_destino", "importe", "🗑 Eliminar"])
 
-        delete_movimientos_bulk(ids_borrar)
-        res_up = upsert_movimientos_bulk(rows_upsert)
-        res_in = insert_movimientos_bulk(rows_insert)
-
-        if (res_up is None) or (res_in is None):
-            st.error("No se pudo guardar (mira el error arriba).")
-        else:
-            st.success(f"Guardado ✅ (updates: {len(res_up)} | inserts: {len(res_in)})")
-            st.rerun()
+    if st.button("💾 Guardar cambios", key="save_transf_real", disabled=st.session_state["saving"]):
+        guardar_cambios_robusto("transf", df_t_edit, modo="transferencias", cols_fingerprint=["id", "fecha", "descripcion", "cuenta", "cuenta_destino", "importe", "🗑 Eliminar"])
 
 
 # ---------- TAB BALANCES ----------
@@ -657,7 +878,27 @@ with tab_hist:
 
     st.write("Movimientos encontrados:", len(df_h))
     columnas = ["fecha", "tipo", "descripcion", "categoria", "cuenta", "cuenta_destino", "importe"]
-    st.dataframe(df_h[columnas].sort_values("fecha"), use_container_width=True, hide_index=True)
+    df_hist = df_h[columnas].sort_values("fecha")
+    st.dataframe(df_hist, use_container_width=True, hide_index=True)
+
+    # export
+    excel_bytes_h = df_to_excel_bytes(df_hist, sheet_name="Historico")
+    if excel_bytes_h:
+        st.download_button(
+            "⬇️ Exportar histórico a Excel",
+            data=excel_bytes_h,
+            file_name="historico.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    pdf_bytes_h = df_to_pdf_bytes(df_hist, title="Histórico completo")
+    if pdf_bytes_h:
+        st.download_button(
+            "⬇️ Exportar histórico a PDF",
+            data=pdf_bytes_h,
+            file_name="historico.pdf",
+            mime="application/pdf",
+        )
 
 
 # ---------- TAB CONFIG ----------
@@ -682,8 +923,13 @@ with tab_config:
         },
     )
 
-    if st.button("💾 Guardar saldos", key="save_saldos"):
-        for _, row in df_conf_edit.iterrows():
-            update_saldo_inicial_upsert(row["cuenta"], row["saldo_inicial"] or 0.0)
-        st.success("Saldos guardados ✅")
-        st.rerun()
+    if st.button("💾 Guardar saldos", key="save_saldos", disabled=st.session_state["saving"]):
+        st.session_state["saving"] = True
+        try:
+            for _, row in df_conf_edit.iterrows():
+                update_saldo_inicial_upsert(row["cuenta"], row["saldo_inicial"] or 0.0)
+            cache_clear_all()
+            st.success("Saldos guardados ✅")
+            st.rerun()
+        finally:
+            st.session_state["saving"] = False
