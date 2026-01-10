@@ -34,6 +34,7 @@ CUENTAS = [
     "Corto plazo",
     "Medio plazo",
     "Largo plazo",
+    "Efectivo",
 ]
 
 CATS_GASTOS = [
