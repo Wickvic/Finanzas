@@ -3,7 +3,6 @@ import pandas as pd
 import requests
 from datetime import date
 import io
-import uuid
 
 # ---------- PDF (reportlab) ----------
 try:
@@ -84,10 +83,8 @@ def parse_importe(v):
         s = v.strip().replace(" ", "")
         if s == "":
             return None
-        # 1.234,56 -> 1234.56
         if "," in s and "." in s:
             s = s.replace(".", "").replace(",", ".")
-        # 12,34 -> 12.34
         elif "," in s and "." not in s:
             s = s.replace(",", ".")
         try:
@@ -123,24 +120,16 @@ def get_movimientos():
 
 
 def insert_movimientos_bulk(rows):
-    """INSERT: filas nuevas SIN id. Si tu tabla no tiene default para id, generamos UUID aquí."""
+    """INSERT: filas nuevas SIN id (si tu tabla genera id)."""
     if not rows:
         return []
-    # Si tu tabla no genera id, descomenta estas 2 líneas:
-    # for row in rows:
-    #     row.setdefault("id", str(uuid.uuid4()))
-
     url = f"{BASE_URL}/{TABLE_MOV}"
     r = requests.post(url, headers=HEADERS, json=rows, timeout=30)
-
-    st.write("INSERT status:", r.status_code)
     if r.status_code >= 400:
         st.error(f"INSERT ERROR: {r.status_code}")
         st.code(r.text)
         return None
-
     if not r.text:
-        st.warning("INSERT OK pero sin body")
         return []
     return r.json()
 
@@ -151,21 +140,15 @@ def upsert_movimientos_bulk(rows):
         return []
     url = f"{BASE_URL}/{TABLE_MOV}?on_conflict=id"
     r = requests.post(url, headers=HEADERS_UPSERT, json=rows, timeout=30)
-
-    st.write("UPSERT status:", r.status_code)
     if r.status_code >= 400:
         st.error(f"UPSERT ERROR: {r.status_code}")
         st.code(r.text)
         return None
-
     if not r.text:
-        st.warning("UPSERT OK pero sin body (r.text vacío)")
         return []
-
     try:
         return r.json()
     except Exception:
-        st.warning("UPSERT OK pero respuesta no es JSON")
         st.code(r.text)
         return []
 
@@ -177,7 +160,6 @@ def delete_movimientos_bulk(ids):
     url = f"{BASE_URL}/{TABLE_MOV}"
     params = {"id": f"in.({','.join(ids)})"}
     r = requests.delete(url, headers=HEADERS, params=params, timeout=30)
-    st.write("DELETE status:", r.status_code)
     if r.status_code >= 400:
         st.error(f"DELETE ERROR: {r.status_code}")
         st.code(r.text)
@@ -279,18 +261,23 @@ def calcular_saldos_por_cuenta(df):
     return saldos
 
 
-# ---------- COPIAR FECHAS ----------
-def rellenar_fechas_huecas_con_anterior(df_edit, fecha_col="fecha"):
-    """Rellena fechas vacías con la última fecha válida anterior (útil para copiar fecha fila a fila)."""
-    df2 = df_edit.copy()
-    last = None
+# ---------- DEFAULTS EN FILAS NUEVAS ----------
+def aplicar_defaults_df_editor(df_visible, default_cuenta="Principal"):
+    """
+    Si una fila parece 'nueva' (id vacío) y cuenta está vacía, la ponemos a Principal.
+    Esto se ejecuta ANTES de renderizar el editor, que es lo que Streamlit permite.
+    """
+    df2 = df_visible.copy()
+    if "cuenta" not in df2.columns:
+        return df2
+
     for i in range(len(df2)):
-        v = df2.at[i, fecha_col] if fecha_col in df2.columns else None
-        if v in (None, "", "NaT") or (pd.isna(v) if not isinstance(v, date) else False):
-            if last is not None:
-                df2.at[i, fecha_col] = last
-        else:
-            last = v
+        rid = df2.at[i, "id"] if "id" in df2.columns else ""
+        cuenta = df2.at[i, "cuenta"]
+        es_nueva = (rid is None) or (str(rid).strip() == "")
+        cuenta_vacia = (cuenta is None) or (str(cuenta).strip() == "")
+        if es_nueva and cuenta_vacia:
+            df2.at[i, "cuenta"] = default_cuenta
     return df2
 
 
@@ -353,6 +340,10 @@ def validar_y_preparar_payload_desde_editor(df_edit, modo):
     return ids_borrar, rows_upsert, rows_insert
 
 
+def total_importe_col(df_edit, col="importe"):
+    return sum(float(parse_importe(x) or 0) for x in df_edit[col].tolist())
+
+
 # ---------- APP ----------
 st.set_page_config(page_title="Finanzas Familiares", layout="wide")
 st.title("Finanzas familiares")
@@ -369,33 +360,11 @@ except Exception as e:
 anios_disponibles = sorted([int(a) for a in df_base["anio"].dropna().unique()], reverse=True) or [date.today().year]
 meses_disponibles = list(range(1, 13))
 
-tab_gastos, tab_ingresos, tab_transf, tab_balances, tab_hist, tab_config, tab_debug = st.tabs(
-    ["💸 Gastos", "💰 Ingresos", "🔁 Transferencias", "📊 Balances", "📚 Histórico", "⚙️ Config", "🧪 Debug"]
+tab_gastos, tab_ingresos, tab_transf, tab_balances, tab_hist, tab_config = st.tabs(
+    ["💸 Gastos", "💰 Ingresos", "🔁 Transferencias", "📊 Balances", "📚 Histórico", "⚙️ Config"]
 )
 
-# ---------- TAB DEBUG ----------
-with tab_debug:
-    st.subheader("🧪 Debug Supabase")
-    st.caption("Si el INSERT falla por id NOT NULL, activa el uuid en tabla o descomenta el generador UUID en insert_movimientos_bulk().")
-
-    if st.button("🧪 Test INSERT directo (1€ en Principal/Cesta)"):
-        test = [{
-            "fecha": date.today().isoformat(),
-            "descripcion": "TEST",
-            "categoria": "Cesta",
-            "cuenta": "Principal",
-            "cuenta_destino": None,
-            "importe": 1.23,
-        }]
-        res = insert_movimientos_bulk(test)
-        st.write("Respuesta:", res)
-
-    st.markdown("---")
-    st.write("Primeras 10 filas cargadas desde Supabase:")
-    st.dataframe(df_base.head(10), use_container_width=True, hide_index=True)
-
-
-# ---------- HELPERS UI ----------
+# ---------- helper filtros ----------
 def filtros_anio_mes_texto(prefix, modo_movil_local):
     if modo_movil_local:
         anio = st.selectbox("Año", anios_disponibles, key=f"anio_{prefix}_m")
@@ -423,28 +392,9 @@ def filtros_anio_mes_texto(prefix, modo_movil_local):
         return anio, mes, texto
 
 
-def total_importe_col(df_edit, col="importe"):
-    return sum(float(parse_importe(x) or 0) for x in df_edit[col].tolist())
-
-
-def aplicar_defaults_nuevas_filas(df_visible, modo):
-    """
-    - Cuenta por defecto: Principal en filas nuevas (id vacío) y cuenta vacía.
-    """
-    df2 = df_visible.copy()
-    if "cuenta" in df2.columns:
-        for i in range(len(df2)):
-            rid = df2.at[i, "id"] if "id" in df2.columns else ""
-            cuenta = df2.at[i, "cuenta"]
-            if (rid in (None, "", "nan")) and (cuenta in (None, "", "nan")):
-                df2.at[i, "cuenta"] = "Principal"
-    return df2
-
-
 # ---------- TAB GASTOS ----------
 with tab_gastos:
     st.subheader("Gastos")
-
     anio_g, mes_g, texto_g = filtros_anio_mes_texto("g", modo_movil)
 
     df_g = df_base.copy()
@@ -455,7 +405,6 @@ with tab_gastos:
         df_g = df_g[df_g["mes"] == mes_g]
     if texto_g:
         df_g = df_g[df_g["descripcion"].str.contains(texto_g, case=False, na=False)]
-
     df_g = df_g.reset_index(drop=True)
 
     if df_g.empty:
@@ -473,13 +422,7 @@ with tab_gastos:
     df_g_visible = df_g[visible].copy()
     df_g_visible["importe"] = df_g_visible["importe"].apply(lambda x: "" if pd.isna(x) else str(x))
     df_g_visible["🗑 Eliminar"] = False
-    df_g_visible = aplicar_defaults_nuevas_filas(df_g_visible, modo="gastos")
-
-    st.caption("💡 Puedes copiar/pegar celdas (Ctrl+C / Ctrl+V). Botón de abajo rellena fechas vacías con la de arriba.")
-    colb1, colb2 = st.columns([1, 2])
-    with colb1:
-        if st.button("📅 Rellenar fechas vacías", key="fill_dates_g"):
-            st.session_state["editor_gastos"] = rellenar_fechas_huecas_con_anterior(df_g_visible)
+    df_g_visible = aplicar_defaults_df_editor(df_g_visible, default_cuenta="Principal")
 
     df_g_edit = st.data_editor(
         df_g_visible,
@@ -488,7 +431,7 @@ with tab_gastos:
         use_container_width=True,
         key="editor_gastos",
         column_config={
-            "id": st.column_config.TextColumn("", disabled=True),  # casi oculto
+            "id": st.column_config.TextColumn("", disabled=True, width="small"),
             "fecha": st.column_config.DateColumn("Fecha", format=DATE_FORMAT),
             "categoria": st.column_config.SelectboxColumn("Categoría", options=CATS_GASTOS),
             "cuenta": st.column_config.SelectboxColumn("Cuenta", options=CUENTAS),
@@ -501,15 +444,12 @@ with tab_gastos:
 
     if st.button("💾 Guardar cambios (Gastos)", key="save_gastos"):
         ids_borrar, rows_upsert, rows_insert = validar_y_preparar_payload_desde_editor(df_g_edit, modo="gastos")
-
         if modo_debug:
-            st.write("Filas en editor:", len(df_g_edit))
             st.write("IDs a borrar:", ids_borrar)
-            st.write("Upserts (con id):", len(rows_upsert))
-            st.write("Inserts (sin id):", len(rows_insert))
-            st.json({"upsert_first": rows_upsert[:5], "insert_first": rows_insert[:5]})
+            st.write("Upserts:", len(rows_upsert), "Inserts:", len(rows_insert))
+            st.json({"upsert": rows_upsert[:5], "insert": rows_insert[:5]})
 
-        ok_del = delete_movimientos_bulk(ids_borrar)
+        delete_movimientos_bulk(ids_borrar)
         res_up = upsert_movimientos_bulk(rows_upsert)
         res_in = insert_movimientos_bulk(rows_insert)
 
@@ -523,7 +463,6 @@ with tab_gastos:
 # ---------- TAB INGRESOS ----------
 with tab_ingresos:
     st.subheader("Ingresos")
-
     anio_i, mes_i, texto_i = filtros_anio_mes_texto("i", modo_movil)
 
     df_i = df_base.copy()
@@ -534,7 +473,6 @@ with tab_ingresos:
         df_i = df_i[df_i["mes"] == mes_i]
     if texto_i:
         df_i = df_i[df_i["descripcion"].str.contains(texto_i, case=False, na=False)]
-
     df_i = df_i.reset_index(drop=True)
 
     if df_i.empty:
@@ -552,11 +490,7 @@ with tab_ingresos:
     df_i_visible = df_i[visible].copy()
     df_i_visible["importe"] = df_i_visible["importe"].apply(lambda x: "" if pd.isna(x) else str(x))
     df_i_visible["🗑 Eliminar"] = False
-    df_i_visible = aplicar_defaults_nuevas_filas(df_i_visible, modo="ingresos")
-
-    st.caption("💡 Puedes copiar/pegar celdas (Ctrl+C / Ctrl+V). Botón de abajo rellena fechas vacías con la de arriba.")
-    if st.button("📅 Rellenar fechas vacías", key="fill_dates_i"):
-        st.session_state["editor_ingresos"] = rellenar_fechas_huecas_con_anterior(df_i_visible)
+    df_i_visible = aplicar_defaults_df_editor(df_i_visible, default_cuenta="Principal")
 
     df_i_edit = st.data_editor(
         df_i_visible,
@@ -565,7 +499,7 @@ with tab_ingresos:
         use_container_width=True,
         key="editor_ingresos",
         column_config={
-            "id": st.column_config.TextColumn("", disabled=True),
+            "id": st.column_config.TextColumn("", disabled=True, width="small"),
             "fecha": st.column_config.DateColumn("Fecha", format=DATE_FORMAT),
             "categoria": st.column_config.SelectboxColumn("Categoría", options=CATS_INGRESOS),
             "cuenta": st.column_config.SelectboxColumn("Cuenta", options=CUENTAS),
@@ -578,15 +512,12 @@ with tab_ingresos:
 
     if st.button("💾 Guardar cambios (Ingresos)", key="save_ingresos"):
         ids_borrar, rows_upsert, rows_insert = validar_y_preparar_payload_desde_editor(df_i_edit, modo="ingresos")
-
         if modo_debug:
-            st.write("Filas en editor:", len(df_i_edit))
             st.write("IDs a borrar:", ids_borrar)
-            st.write("Upserts (con id):", len(rows_upsert))
-            st.write("Inserts (sin id):", len(rows_insert))
-            st.json({"upsert_first": rows_upsert[:5], "insert_first": rows_insert[:5]})
+            st.write("Upserts:", len(rows_upsert), "Inserts:", len(rows_insert))
+            st.json({"upsert": rows_upsert[:5], "insert": rows_insert[:5]})
 
-        ok_del = delete_movimientos_bulk(ids_borrar)
+        delete_movimientos_bulk(ids_borrar)
         res_up = upsert_movimientos_bulk(rows_upsert)
         res_in = insert_movimientos_bulk(rows_insert)
 
@@ -600,7 +531,6 @@ with tab_ingresos:
 # ---------- TAB TRANSFERENCIAS ----------
 with tab_transf:
     st.subheader("Transferencias")
-
     anio_t, mes_t, texto_t = filtros_anio_mes_texto("t", modo_movil)
 
     df_t = df_base.copy()
@@ -610,7 +540,6 @@ with tab_transf:
         df_t = df_t[df_t["mes"] == mes_t]
     if texto_t:
         df_t = df_t[df_t["descripcion"].str.contains(texto_t, case=False, na=False)]
-
     df_t = df_t.reset_index(drop=True)
 
     if df_t.empty:
@@ -628,11 +557,7 @@ with tab_transf:
     df_t_visible = df_t[visible].copy()
     df_t_visible["importe"] = df_t_visible["importe"].apply(lambda x: "" if pd.isna(x) else str(x))
     df_t_visible["🗑 Eliminar"] = False
-    df_t_visible = aplicar_defaults_nuevas_filas(df_t_visible, modo="transferencias")
-
-    st.caption("💡 Puedes copiar/pegar celdas (Ctrl+C / Ctrl+V). Botón de abajo rellena fechas vacías con la de arriba.")
-    if st.button("📅 Rellenar fechas vacías", key="fill_dates_t"):
-        st.session_state["editor_transf"] = rellenar_fechas_huecas_con_anterior(df_t_visible)
+    df_t_visible = aplicar_defaults_df_editor(df_t_visible, default_cuenta="Principal")
 
     df_t_edit = st.data_editor(
         df_t_visible,
@@ -641,7 +566,7 @@ with tab_transf:
         use_container_width=True,
         key="editor_transf",
         column_config={
-            "id": st.column_config.TextColumn("", disabled=True),
+            "id": st.column_config.TextColumn("", disabled=True, width="small"),
             "fecha": st.column_config.DateColumn("Fecha", format=DATE_FORMAT),
             "cuenta": st.column_config.SelectboxColumn("Cuenta origen", options=CUENTAS),
             "cuenta_destino": st.column_config.SelectboxColumn("Cuenta destino", options=CUENTAS),
@@ -652,15 +577,12 @@ with tab_transf:
 
     if st.button("💾 Guardar cambios (Transferencias)", key="save_transf"):
         ids_borrar, rows_upsert, rows_insert = validar_y_preparar_payload_desde_editor(df_t_edit, modo="transferencias")
-
         if modo_debug:
-            st.write("Filas en editor:", len(df_t_edit))
             st.write("IDs a borrar:", ids_borrar)
-            st.write("Upserts (con id):", len(rows_upsert))
-            st.write("Inserts (sin id):", len(rows_insert))
-            st.json({"upsert_first": rows_upsert[:5], "insert_first": rows_insert[:5]})
+            st.write("Upserts:", len(rows_upsert), "Inserts:", len(rows_insert))
+            st.json({"upsert": rows_upsert[:5], "insert": rows_insert[:5]})
 
-        ok_del = delete_movimientos_bulk(ids_borrar)
+        delete_movimientos_bulk(ids_borrar)
         res_up = upsert_movimientos_bulk(rows_upsert)
         res_in = insert_movimientos_bulk(rows_insert)
 
@@ -674,7 +596,6 @@ with tab_transf:
 # ---------- TAB BALANCES ----------
 with tab_balances:
     st.subheader("📊 Balances")
-
     anio_b = st.selectbox("Año", anios_disponibles, key="anio_bal")
     meses_sel = st.multiselect("Meses", options=meses_disponibles, default=meses_disponibles, format_func=nombre_mes)
 
