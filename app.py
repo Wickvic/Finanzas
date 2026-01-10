@@ -685,18 +685,13 @@ with tab_gastos:
     unsaved_banner("gastos", df_g_edit, cols_fingerprint=["id", "fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"])
     st.metric("Total gastos (vista actual)", f"{total_importe_col(df_g_edit):,.2f} €")
 
-    st.button(
-        "💾 Guardar cambios",
-        key="save_gastos",
-        disabled=st.session_state["saving"],
-        on_click=lambda: None,
+   if st.button("💾 Guardar cambios", key="save_gastos_real", disabled=st.session_state["saving"]):
+    guardar_cambios_robusto(
+        "gastos",
+        df_g_edit,
+        modo="gastos",
+        cols_fingerprint=["id", "fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"],
     )
-    if st.session_state.get("save_gastos"):
-        # streamlit “toggle” rara: lo tratamos como click normal leyendo el retorno no es fiable.
-        # Mejor: usamos un botón real con if. Pero para mantenerlo simple, repetimos:
-        pass
-    if st.button("💾 Guardar cambios", key="save_gastos_real", disabled=st.session_state["saving"]):
-        guardar_cambios_robusto("gastos", df_g_edit, modo="gastos", cols_fingerprint=["id", "fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"])
 
 
 # ---------- TAB INGRESOS ----------
