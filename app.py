@@ -27,6 +27,12 @@ HEADERS = {
     "Prefer": "return=representation",
 }
 
+# Para UPSERT masivo
+HEADERS_UPSERT = {
+    **HEADERS,
+    "Prefer": "return=representation,resolution=merge-duplicates",
+}
+
 # ---------- LISTAS FIJAS ----------
 CUENTAS = [
     "Principal",
@@ -34,6 +40,7 @@ CUENTAS = [
     "Corto plazo",
     "Medio plazo",
     "Largo plazo",
+    "Efectivo",  # ✅ nueva cuenta
 ]
 
 CATS_GASTOS = [
@@ -76,11 +83,46 @@ def nombre_mes(m):
     return MESES_NOMBRES.get(m, str(m))
 
 
+# ---------- UTIL: IMPORTE (coma o punto) ----------
+def parse_importe(v):
+    """Acepta 12.34, 12,34, 1.234,56, etc. Devuelve float o None."""
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        s = v.strip().replace(" ", "")
+        if s == "":
+            return None
+        # 1.234,56 -> 1234.56
+        if "," in s and "." in s:
+            s = s.replace(".", "").replace(",", ".")
+        # 12,34 -> 12.34
+        elif "," in s and "." not in s:
+            s = s.replace(",", ".")
+        try:
+            return float(s)
+        except Exception:
+            return None
+    return None
+
+
+def normalizar_fecha(valor):
+    from datetime import date as _date
+    import pandas as _pd
+
+    if isinstance(valor, _pd.Timestamp):
+        return valor.date().isoformat()
+    if isinstance(valor, _date):
+        return valor.isoformat()
+    return valor
+
+
 # ---------- FUNCIONES SUPABASE ----------
 def get_table(table):
     url = f"{BASE_URL}/{table}"
     params = {"select": "*"}
-    r = requests.get(url, headers=HEADERS, params=params)
+    r = requests.get(url, headers=HEADERS, params=params, timeout=30)
     r.raise_for_status()
     return r.json()
 
@@ -88,66 +130,111 @@ def get_table(table):
 def get_movimientos():
     url = f"{BASE_URL}/{TABLE_MOV}"
     params = {"select": "*", "order": "fecha.asc"}
-    r = requests.get(url, headers=HEADERS, params=params)
+    r = requests.get(url, headers=HEADERS, params=params, timeout=30)
     r.raise_for_status()
     return r.json()
 
 
-def insert_movimiento(data):
+def insert_movimientos_bulk(rows):
+    """Inserta en bloque (sin id)."""
+    if not rows:
+        return []
     url = f"{BASE_URL}/{TABLE_MOV}"
-    r = requests.post(url, headers=HEADERS, json=data)
+    r = requests.post(url, headers=HEADERS, json=rows, timeout=30)
     if r.status_code >= 400:
-        st.error(f"Error al insertar en Supabase ({r.status_code}): {r.text}")
-        return None
-    return r.json()
+        st.error(f"Error al insertar (bulk) ({r.status_code}): {r.text}")
+        return []
+    return r.json() if r.text else []
 
 
-def update_movimiento(row_id, data):
+def upsert_movimientos_bulk(rows):
+    """UPSERT en bloque usando on_conflict=id (filas con id se actualizan; sin id se insertan)."""
+    if not rows:
+        return []
+    url = f"{BASE_URL}/{TABLE_MOV}?on_conflict=id"
+    r = requests.post(url, headers=HEADERS_UPSERT, json=rows, timeout=30)
+    if r.status_code >= 400:
+        st.error(f"Error al upsert (bulk) ({r.status_code}): {r.text}")
+        return []
+    return r.json() if r.text else []
+
+
+def delete_movimientos_bulk(ids):
+    """Borrado en bloque por ids."""
+    ids = [str(i) for i in ids if i]
+    if not ids:
+        return True
     url = f"{BASE_URL}/{TABLE_MOV}"
-    params = {"id": f"eq.{row_id}"}
-    r = requests.patch(url, headers=HEADERS, params=params, json=data)
+    params = {"id": f"in.({','.join(ids)})"}
+    r = requests.delete(url, headers=HEADERS, params=params, timeout=30)
     if r.status_code >= 400:
-        st.error(f"Error al actualizar en Supabase ({r.status_code}): {r.text}")
-        return None
-    return r.json()
-
-
-def delete_movimiento(row_id):
-    url = f"{BASE_URL}/{TABLE_MOV}"
-    params = {"id": f"eq.{row_id}"}
-    r = requests.delete(url, headers=HEADERS, params=params)
-    if r.status_code >= 400:
-        st.error(f"Error al borrar en Supabase ({r.status_code}): {r.text}")
+        st.error(f"Error al borrar (bulk) ({r.status_code}): {r.text}")
         return False
     return True
 
 
-def update_saldo_inicial(cuenta, saldo):
-    """Actualiza el saldo inicial de una cuenta (tabla saldos_iniciales)."""
+def update_saldo_inicial_upsert(cuenta, saldo):
+    """Upsert manual para saldos_iniciales: si no existe, lo crea."""
     url = f"{BASE_URL}/{TABLE_SALDOS}"
-    params = {"cuenta": f"eq.{cuenta}"}
-    data = {"saldo_inicial": float(saldo)}
-    r = requests.patch(url, headers=HEADERS, params=params, json=data)
-    if r.status_code not in (200, 204):
+
+    # ¿Existe?
+    r0 = requests.get(url, headers=HEADERS, params={"select": "*", "cuenta": f"eq.{cuenta}"}, timeout=30)
+    r0.raise_for_status()
+    existe = len(r0.json()) > 0
+
+    if existe:
+        r = requests.patch(
+            url,
+            headers=HEADERS,
+            params={"cuenta": f"eq.{cuenta}"},
+            json={"saldo_inicial": float(saldo)},
+            timeout=30
+        )
+    else:
+        r = requests.post(
+            url,
+            headers=HEADERS,
+            json={"cuenta": cuenta, "saldo_inicial": float(saldo)},
+            timeout=30
+        )
+
+    if r.status_code >= 400:
         r.raise_for_status()
 
 
 # ---------- UTILIDADES DATA ----------
 def preparar_dataframe_base():
     rows = get_movimientos()
-    if rows:
-        df = pd.DataFrame(rows)
-    else:
-        df = pd.DataFrame([])
+    df = pd.DataFrame(rows) if rows else pd.DataFrame([])
 
+    # Asegurar columnas
     for col in ["id"] + DB_COLUMNS:
         if col not in df.columns:
             df[col] = None
 
-    df["fecha"] = pd.to_datetime(df["fecha"]).dt.date
-    df["fecha_dt"] = pd.to_datetime(df["fecha"])
+    # Fecha robusta
+    df["fecha_dt"] = pd.to_datetime(df["fecha"], errors="coerce")
+    df["fecha"] = df["fecha_dt"].dt.date
     df["anio"] = df["fecha_dt"].dt.year
     df["mes"] = df["fecha_dt"].dt.month
+
+    # Asegurar tipos
+    df["descripcion"] = df["descripcion"].fillna("").astype(str)
+    df["categoria"] = df["categoria"].fillna("").astype(str)
+    df["cuenta"] = df["cuenta"].fillna("").astype(str)
+    df["cuenta_destino"] = df["cuenta_destino"].where(df["cuenta_destino"].notna(), None)
+
+    # importe como float (para cálculos). Si viene raro, lo dejamos NaN.
+    def _to_float(x):
+        if x is None or (isinstance(x, str) and x.strip() == ""):
+            return float("nan")
+        try:
+            return float(x)
+        except Exception:
+            v = parse_importe(str(x))
+            return float(v) if v is not None else float("nan")
+
+    df["importe"] = df["importe"].apply(_to_float)
     return df
 
 
@@ -169,7 +256,7 @@ def get_saldos_iniciales():
 
 
 def calcular_saldos_por_cuenta(df):
-    saldos = get_saldos_iniciales()  # saldo inicial
+    saldos = get_saldos_iniciales()
 
     for _, row in df.iterrows():
         imp = float(row.get("importe") or 0)
@@ -195,102 +282,102 @@ def calcular_saldos_por_cuenta(df):
     return saldos
 
 
-def normalizar_fecha(valor):
-    from datetime import date as _date
-    import pandas as _pd
-
-    if isinstance(valor, _pd.Timestamp):
-        return valor.date().isoformat()
-    if isinstance(valor, _date):
-        return valor.isoformat()
-    return valor
-
-
-def guardar_cambios(df_edit_full, ids_originales, modo, ids_marcados_borrar=None):
-    """Sincroniza cambios con Supabase, incluyendo borrados marcados con la papelera.
-       Solo guarda filas 'completas' y limpia NaN/NaT para que el JSON sea válido.
+# ---------- GUARDADO ROBUSTO (solo con botón) ----------
+def build_full_rows_from_editor(df_orig, df_edit_visible, modo):
     """
-    import pandas as _pd
+    Reconstruye filas completas para BD usando posición (reset_index),
+    evitando bugs por índices/filtrado.
+    """
+    df_orig = df_orig.reset_index(drop=True)
+    df_edit_visible = df_edit_visible.reset_index(drop=True)
 
-    if ids_marcados_borrar is None:
-        ids_marcados_borrar = set()
+    rows_full = []
+    for i in range(len(df_edit_visible)):
+        base = {}
+        if i < len(df_orig):
+            base = df_orig.loc[i, ["id"] + DB_COLUMNS].to_dict()
+        else:
+            base = {"id": None}
+            for c in DB_COLUMNS:
+                base[c] = None
 
-    # ---- Borrados (filas que desaparecen + marcadas con papelera) ----
-    ids_editados = set(df_edit_full["id"].dropna())
-    ids_a_borrar = (ids_originales - ids_editados) | set(ids_marcados_borrar)
+        # visibles según modo
+        if modo in ("gastos", "ingresos"):
+            base["fecha"] = df_edit_visible.at[i, "fecha"]
+            base["descripcion"] = df_edit_visible.at[i, "descripcion"]
+            base["categoria"] = df_edit_visible.at[i, "categoria"]
+            base["cuenta"] = df_edit_visible.at[i, "cuenta"]
+            base["importe"] = df_edit_visible.at[i, "importe"]
+            base["cuenta_destino"] = None
+        else:  # transferencias
+            base["fecha"] = df_edit_visible.at[i, "fecha"]
+            base["descripcion"] = df_edit_visible.at[i, "descripcion"]
+            base["categoria"] = "Transferencia"
+            base["cuenta"] = df_edit_visible.at[i, "cuenta"]
+            base["cuenta_destino"] = df_edit_visible.at[i, "cuenta_destino"]
+            base["importe"] = df_edit_visible.at[i, "importe"]
 
-    for borrar_id in ids_a_borrar:
-        if borrar_id:
-            delete_movimiento(borrar_id)
+        base["_eliminar"] = bool(df_edit_visible.at[i, "🗑 Eliminar"]) if "🗑 Eliminar" in df_edit_visible.columns else False
+        rows_full.append(base)
 
-    # ---- Altas / updates ----
-    for _, row in df_edit_full.iterrows():
-        row_dict = row.to_dict()
-        row_id = row_dict.get("id", None)
+    return pd.DataFrame(rows_full)
 
-        # si está marcada para borrar, la ignoramos (ya borrada arriba)
-        if row_id in ids_marcados_borrar:
+
+def validar_y_preparar_payload(df_full, modo):
+    """
+    Devuelve:
+      - ids_a_borrar (solo marcados con 🗑 y con id)
+      - rows_upsert (lista de dicts para upsert masivo)
+    """
+    ids_a_borrar = []
+    rows_upsert = []
+
+    for _, r in df_full.iterrows():
+        row_id = r.get("id")
+        if r.get("_eliminar", False):
+            if pd.notna(row_id) and row_id:
+                ids_a_borrar.append(row_id)
             continue
 
-        # ---- REGLAS DE FILA COMPLETA SEGÚN MODO ----
-        if modo == "transferencias":
-            # necesitamos: fecha, cuenta origen, cuenta destino e importe
-            fecha_ok = row_dict.get("fecha") not in (None, "", "NaT")
-            cuenta_ok = bool(row_dict.get("cuenta"))
-            cuenta_dest_ok = bool(row_dict.get("cuenta_destino"))
-            importe_ok = row_dict.get("importe") not in (None, "", 0, 0.0)
+        # Validar mínimos
+        fecha = r.get("fecha")
+        if pd.isna(fecha) or fecha in (None, "", "NaT"):
+            continue
 
-            if not (fecha_ok and cuenta_ok and cuenta_dest_ok and importe_ok):
-                # fila aún en edición → no se guarda
-                continue
+        imp = parse_importe(r.get("importe"))
+        if imp is None or imp == 0:
+            continue
 
-        else:  # gastos / ingresos
-            # necesitamos: fecha, categoría, cuenta e importe
-            fecha_ok = row_dict.get("fecha") not in (None, "", "NaT")
-            categoria_ok = bool(row_dict.get("categoria"))
-            cuenta_ok = bool(row_dict.get("cuenta"))
-            importe_ok = row_dict.get("importe") not in (None, "", 0, 0.0)
+        cuenta = (r.get("cuenta") or "").strip()
+        if not cuenta:
+            continue
 
-            # si está totalmente vacía → la ignoramos
-            if (
-                row_dict.get("fecha") in (None, "", "NaT")
-                and not row_dict.get("categoria")
-                and not row_dict.get("descripcion")
-                and not row_dict.get("cuenta")
-                and not row_dict.get("importe")
-            ):
-                continue
-
-            # si no está vacía pero le falta algo → todavía no guardamos
-            if not (fecha_ok and categoria_ok and cuenta_ok and importe_ok):
-                continue
-
-        # ---- Normalizar fecha e importe ----
-        row_dict["fecha"] = normalizar_fecha(row_dict.get("fecha"))
-        try:
-            row_dict["importe"] = float(row_dict.get("importe") or 0)
-        except Exception:
-            row_dict["importe"] = 0.0
-
-        # Ajustes según modo
         if modo in ("gastos", "ingresos"):
-            row_dict["cuenta_destino"] = None
-        elif modo == "transferencias":
-            row_dict["categoria"] = row_dict.get("categoria") or "Transferencia"
-
-        # Construimos el diccionario final SIN NaN / NaT
-        data = {}
-        for col in DB_COLUMNS:
-            v = row_dict.get(col, None)
-            if _pd.isna(v):
-                v = None
-            data[col] = v
-
-        # Update o insert
-        if row_id and _pd.notna(row_id):
-            update_movimiento(row_id, data)
+            categoria = (r.get("categoria") or "").strip()
+            if not categoria:
+                continue
         else:
-            insert_movimiento(data)
+            categoria = "Transferencia"
+            cuenta_destino = (r.get("cuenta_destino") or "").strip()
+            if not cuenta_destino:
+                continue
+
+        payload = {
+            "fecha": normalizar_fecha(fecha),
+            "descripcion": (r.get("descripcion") or "").strip(),
+            "categoria": categoria,
+            "cuenta": cuenta,
+            "cuenta_destino": None if modo in ("gastos", "ingresos") else cuenta_destino,
+            "importe": float(imp),
+        }
+
+        # si ya tiene id, se actualizará en upsert
+        if pd.notna(row_id) and row_id:
+            payload["id"] = row_id
+
+        rows_upsert.append(payload)
+
+    return ids_a_borrar, rows_upsert
 
 
 # ---------- EXPORTAR ----------
@@ -347,7 +434,6 @@ def df_to_pdf_bytes(df, title="Datos"):
 st.set_page_config(page_title="Finanzas Familiares", layout="wide")
 st.title("Finanzas familiares")
 
-# Modo móvil compacto
 modo_movil = st.sidebar.checkbox("📱 Modo móvil compacto", value=False)
 
 try:
@@ -356,12 +442,14 @@ except Exception as e:
     st.error(f"Error al conectar con Supabase: {e}")
     st.stop()
 
-anios_disponibles = sorted(df_base["anio"].dropna().unique(), reverse=True) or [date.today().year]
+anios_disponibles = sorted([int(a) for a in df_base["anio"].dropna().unique()], reverse=True) or [date.today().year]
 meses_disponibles = list(range(1, 13))
 
 tab_gastos, tab_ingresos, tab_transf, tab_balances, tab_hist, tab_config = st.tabs(
     ["💸 Gastos", "💰 Ingresos", "🔁 Transferencias", "📊 Balances", "📚 Histórico completo", "⚙️ Configuración"]
 )
+
+DATE_FORMAT = "DD/MM/YYYY"
 
 # ---------- TAB GASTOS ----------
 with tab_gastos:
@@ -399,6 +487,8 @@ with tab_gastos:
     if texto_g:
         df_g = df_g[df_g["descripcion"].str.contains(texto_g, case=False, na=False)]
 
+    df_g = df_g.reset_index(drop=True)
+
     if df_g.empty:
         df_g = pd.DataFrame([{
             "id": None,
@@ -407,53 +497,54 @@ with tab_gastos:
             "categoria": "",
             "cuenta": "",
             "cuenta_destino": None,
-            "importe": 0.0,
+            "importe": float("nan"),
         }])
 
-    df_g_orig = df_g.copy()
-    ids_originales_g = set(df_g_orig["id"].dropna())
+    df_g_orig = df_g.copy().reset_index(drop=True)
 
     visible_g = ["fecha", "descripcion", "categoria", "cuenta", "importe"]
     df_g_visible = df_g_orig[visible_g].copy()
+    # Mostrar importe como texto para evitar que "Enter" lo borre si hay coma
+    df_g_visible["importe"] = df_g_visible["importe"].apply(lambda x: "" if pd.isna(x) else str(x))
     df_g_visible["🗑 Eliminar"] = False
+
+    st.caption("💡 Tip: puedes escribir importes con coma o punto (12,50 o 12.50). Pulsa **Guardar cambios** para enviar a Supabase.")
 
     df_g_edit_visible = st.data_editor(
         df_g_visible,
+        hide_index=True,  # ✅ oculta el numerito del índice
         num_rows="dynamic",
         use_container_width=True,
         key="editor_gastos",
         column_config={
-            "fecha": st.column_config.DateColumn("Fecha", format="YYYY-MM-DD"),
+            "fecha": st.column_config.DateColumn("Fecha", format=DATE_FORMAT),
             "categoria": st.column_config.SelectboxColumn("Categoría", options=CATS_GASTOS),
             "cuenta": st.column_config.SelectboxColumn("Cuenta", options=CUENTAS),
-            "importe": st.column_config.NumberColumn("Importe", format="%.2f"),
+            "importe": st.column_config.TextColumn("Importe"),
             "🗑 Eliminar": st.column_config.CheckboxColumn("🗑 Eliminar"),
         },
     )
 
-    rows_full = []
-    for idx, row in df_g_edit_visible.iterrows():
-        if idx in df_g_orig.index:
-            base = df_g_orig.loc[idx, ["id"] + DB_COLUMNS].to_dict()
-        else:
-            base = {"id": None}
-            for col in DB_COLUMNS:
-                base.setdefault(col, None)
-        for col in visible_g:
-            base[col] = row.get(col)
-        base["eliminar"] = bool(row.get("🗑 Eliminar", False))
-        rows_full.append(base)
-
-    df_g_full = pd.DataFrame(rows_full)
-    ids_marcados_borrar_g = set(df_g_full.loc[df_g_full["eliminar"], "id"].dropna())
-    df_g_full_db = df_g_full.drop(columns=["eliminar"])
-
-    guardar_cambios(df_g_full_db, ids_originales_g, modo="gastos", ids_marcados_borrar=ids_marcados_borrar_g)
-
-    total_g = float(df_g_full_db["importe"].fillna(0).sum())
+    # Total vista actual (parseando importe)
+    total_g = 0.0
+    for v in df_g_edit_visible["importe"].tolist():
+        imp = parse_importe(v)
+        total_g += float(imp or 0)
     st.metric("Total gastos (vista actual)", f"{total_g:,.2f} €")
 
-    export_g = df_g_full_db[["fecha", "descripcion", "categoria", "cuenta", "importe"]].copy()
+    if st.button("💾 Guardar cambios", key="save_gastos"):
+        df_full = build_full_rows_from_editor(df_g_orig, df_g_edit_visible, modo="gastos")
+        ids_borrar, rows_upsert = validar_y_preparar_payload(df_full, modo="gastos")
+
+        ok_del = delete_movimientos_bulk(ids_borrar)
+        _ = upsert_movimientos_bulk(rows_upsert)  # bulk upsert (1 request)
+        if ok_del:
+            st.success("Guardado en Supabase ✅")
+        st.rerun()
+
+    export_g = df_g_edit_visible[["fecha", "descripcion", "categoria", "cuenta", "importe"]].copy()
+    # Normalizar importe export
+    export_g["importe"] = export_g["importe"].apply(lambda x: parse_importe(x) or 0.0)
 
     col_e1, col_e2 = st.columns(2)
     with col_e1:
@@ -519,6 +610,8 @@ with tab_ingresos:
     if texto_i:
         df_i = df_i[df_i["descripcion"].str.contains(texto_i, case=False, na=False)]
 
+    df_i = df_i.reset_index(drop=True)
+
     if df_i.empty:
         df_i = pd.DataFrame([{
             "id": None,
@@ -527,53 +620,51 @@ with tab_ingresos:
             "categoria": "",
             "cuenta": "",
             "cuenta_destino": None,
-            "importe": 0.0,
+            "importe": float("nan"),
         }])
 
-    df_i_orig = df_i.copy()
-    ids_originales_i = set(df_i_orig["id"].dropna())
+    df_i_orig = df_i.copy().reset_index(drop=True)
 
     visible_i = ["fecha", "descripcion", "categoria", "cuenta", "importe"]
     df_i_visible = df_i_orig[visible_i].copy()
+    df_i_visible["importe"] = df_i_visible["importe"].apply(lambda x: "" if pd.isna(x) else str(x))
     df_i_visible["🗑 Eliminar"] = False
+
+    st.caption("💡 Importes con coma o punto. Pulsa **Guardar cambios** para enviar a Supabase.")
 
     df_i_edit_visible = st.data_editor(
         df_i_visible,
+        hide_index=True,
         num_rows="dynamic",
         use_container_width=True,
         key="editor_ingresos",
         column_config={
-            "fecha": st.column_config.DateColumn("Fecha", format="YYYY-MM-DD"),
+            "fecha": st.column_config.DateColumn("Fecha", format=DATE_FORMAT),
             "categoria": st.column_config.SelectboxColumn("Categoría", options=CATS_INGRESOS),
             "cuenta": st.column_config.SelectboxColumn("Cuenta", options=CUENTAS),
-            "importe": st.column_config.NumberColumn("Importe", format="%.2f"),
+            "importe": st.column_config.TextColumn("Importe"),
             "🗑 Eliminar": st.column_config.CheckboxColumn("🗑 Eliminar"),
         },
     )
 
-    rows_full_i = []
-    for idx, row in df_i_edit_visible.iterrows():
-        if idx in df_i_orig.index:
-            base = df_i_orig.loc[idx, ["id"] + DB_COLUMNS].to_dict()
-        else:
-            base = {"id": None}
-            for col in DB_COLUMNS:
-                base.setdefault(col, None)
-        for col in visible_i:
-            base[col] = row.get(col)
-        base["eliminar"] = bool(row.get("🗑 Eliminar", False))
-        rows_full_i.append(base)
-
-    df_i_full = pd.DataFrame(rows_full_i)
-    ids_marcados_borrar_i = set(df_i_full.loc[df_i_full["eliminar"], "id"].dropna())
-    df_i_full_db = df_i_full.drop(columns=["eliminar"])
-
-    guardar_cambios(df_i_full_db, ids_originales_i, modo="ingresos", ids_marcados_borrar=ids_marcados_borrar_i)
-
-    total_i = float(df_i_full_db["importe"].fillna(0).sum())
+    total_i = 0.0
+    for v in df_i_edit_visible["importe"].tolist():
+        imp = parse_importe(v)
+        total_i += float(imp or 0)
     st.metric("Total ingresos (vista actual)", f"{total_i:,.2f} €")
 
-    export_i = df_i_full_db[["fecha", "descripcion", "categoria", "cuenta", "importe"]].copy()
+    if st.button("💾 Guardar cambios", key="save_ingresos"):
+        df_full = build_full_rows_from_editor(df_i_orig, df_i_edit_visible, modo="ingresos")
+        ids_borrar, rows_upsert = validar_y_preparar_payload(df_full, modo="ingresos")
+
+        ok_del = delete_movimientos_bulk(ids_borrar)
+        _ = upsert_movimientos_bulk(rows_upsert)
+        if ok_del:
+            st.success("Guardado en Supabase ✅")
+        st.rerun()
+
+    export_i = df_i_edit_visible[["fecha", "descripcion", "categoria", "cuenta", "importe"]].copy()
+    export_i["importe"] = export_i["importe"].apply(lambda x: parse_importe(x) or 0.0)
 
     col_e1, col_e2 = st.columns(2)
     with col_e1:
@@ -638,6 +729,8 @@ with tab_transf:
     if texto_t:
         df_t = df_t[df_t["descripcion"].str.contains(texto_t, case=False, na=False)]
 
+    df_t = df_t.reset_index(drop=True)
+
     if df_t.empty:
         df_t = pd.DataFrame([{
             "id": None,
@@ -646,51 +739,45 @@ with tab_transf:
             "categoria": "Transferencia",
             "cuenta": "",
             "cuenta_destino": "",
-            "importe": 0.0,
+            "importe": float("nan"),
         }])
 
-    df_t_orig = df_t.copy()
-    ids_originales_t = set(df_t_orig["id"].dropna())
+    df_t_orig = df_t.copy().reset_index(drop=True)
 
     visible_t = ["fecha", "descripcion", "cuenta", "cuenta_destino", "importe"]
     df_t_visible = df_t_orig[visible_t].copy()
+    df_t_visible["importe"] = df_t_visible["importe"].apply(lambda x: "" if pd.isna(x) else str(x))
     df_t_visible["🗑 Eliminar"] = False
+
+    st.caption("💡 Importes con coma o punto. Pulsa **Guardar cambios** para enviar a Supabase.")
 
     df_t_edit_visible = st.data_editor(
         df_t_visible,
+        hide_index=True,
         num_rows="dynamic",
         use_container_width=True,
         key="editor_transf",
         column_config={
-            "fecha": st.column_config.DateColumn("Fecha", format="YYYY-MM-DD"),
+            "fecha": st.column_config.DateColumn("Fecha", format=DATE_FORMAT),
             "cuenta": st.column_config.SelectboxColumn("Cuenta origen", options=CUENTAS),
             "cuenta_destino": st.column_config.SelectboxColumn("Cuenta destino", options=CUENTAS),
-            "importe": st.column_config.NumberColumn("Importe", format="%.2f"),
+            "importe": st.column_config.TextColumn("Importe"),
             "🗑 Eliminar": st.column_config.CheckboxColumn("🗑 Eliminar"),
         },
     )
 
-    rows_full_t = []
-    for idx, row in df_t_edit_visible.iterrows():
-        if idx in df_t_orig.index:
-            base = df_t_orig.loc[idx, ["id"] + DB_COLUMNS].to_dict()
-        else:
-            base = {"id": None}
-            for col in DB_COLUMNS:
-                base.setdefault(col, None)
-        for col in visible_t:
-            base[col] = row.get(col)
-        base["eliminar"] = bool(row.get("🗑 Eliminar", False))
-        rows_full_t.append(base)
+    if st.button("💾 Guardar cambios", key="save_transf"):
+        df_full = build_full_rows_from_editor(df_t_orig, df_t_edit_visible, modo="transferencias")
+        ids_borrar, rows_upsert = validar_y_preparar_payload(df_full, modo="transferencias")
 
-    df_t_full = pd.DataFrame(rows_full_t)
-    df_t_full["categoria"] = "Transferencia"
-    ids_marcados_borrar_t = set(df_t_full.loc[df_t_full["eliminar"], "id"].dropna())
-    df_t_full_db = df_t_full.drop(columns=["eliminar"])
+        ok_del = delete_movimientos_bulk(ids_borrar)
+        _ = upsert_movimientos_bulk(rows_upsert)
+        if ok_del:
+            st.success("Guardado en Supabase ✅")
+        st.rerun()
 
-    guardar_cambios(df_t_full_db, ids_originales_t, modo="transferencias", ids_marcados_borrar=ids_marcados_borrar_t)
-
-    export_t = df_t_full_db[["fecha", "descripcion", "cuenta", "cuenta_destino", "importe"]].copy()
+    export_t = df_t_edit_visible[["fecha", "descripcion", "cuenta", "cuenta_destino", "importe"]].copy()
+    export_t["importe"] = export_t["importe"].apply(lambda x: parse_importe(x) or 0.0)
 
     col_e1, col_e2 = st.columns(2)
     with col_e1:
@@ -724,7 +811,6 @@ with tab_transf:
 with tab_balances:
     st.subheader("📊 Balances por año y saldos por cuenta")
 
-    # años de balances a partir de 2026 (si no hay, usamos todos)
     anios_balances = sorted([a for a in anios_disponibles if a >= 2026], reverse=True) or anios_disponibles
     anio_b = st.selectbox("Año para análisis", anios_balances, key="anio_bal")
     meses_sel_bal = st.multiselect(
@@ -763,34 +849,18 @@ with tab_balances:
         with c3:
             st.metric("Ahorro (meses seleccionados)", f"{ahorro_anual:,.2f} €")
 
-    # Serie mensual (periodo Mes Año)
-    data_mes = []
-    for m in sorted(meses_sel_bal):
-        gi = df_i_b[df_i_b["mes"] == m]["importe"].sum()
-        gg = df_g_b[df_g_b["mes"] == m]["importe"].sum()
-        data_mes.append({
-            "periodo": f"{nombre_mes(m)} {anio_b}",
-            "Ingresos": gi,
-            "Gastos": gg,
-            "Ahorro": gi - gg,
-        })
-
-
     st.markdown("**Saldos por cuenta (hasta el final del año seleccionado)**")
-
     df_saldos_base = df_base[df_base["anio"] <= anio_b].copy()
     saldos = calcular_saldos_por_cuenta(df_saldos_base)
-    df_saldos = pd.DataFrame(
-        [{"Cuenta": c, "Saldo": sal} for c, sal in saldos.items()]
-    )
+    df_saldos = pd.DataFrame([{"Cuenta": c, "Saldo": saldos.get(c, 0.0)} for c in CUENTAS])
 
     if modo_movil:
-        st.dataframe(df_saldos, use_container_width=True)
+        st.dataframe(df_saldos, use_container_width=True, hide_index=True)
         st.bar_chart(df_saldos.set_index("Cuenta")["Saldo"])
     else:
         col_s1, col_s2 = st.columns([2, 1])
         with col_s1:
-            st.dataframe(df_saldos, use_container_width=True)
+            st.dataframe(df_saldos, use_container_width=True, hide_index=True)
         with col_s2:
             st.bar_chart(df_saldos.set_index("Cuenta")["Saldo"])
 
@@ -867,12 +937,9 @@ with tab_hist:
 
     st.write("Movimientos encontrados:", len(df_h))
 
-    columnas_hist = [
-        "fecha", "tipo", "descripcion", "categoria", "cuenta", "cuenta_destino", "importe"
-    ]
-    df_hist_visible = df_h[columnas_hist].sort_values("fecha")
-
-    st.dataframe(df_hist_visible, use_container_width=True)
+    columnas_hist = ["fecha", "tipo", "descripcion", "categoria", "cuenta", "cuenta_destino", "importe"]
+    df_hist_visible = df_h[columnas_hist].sort_values("fecha").copy()
+    st.dataframe(df_hist_visible, use_container_width=True, hide_index=True)
 
     excel_bytes_h = df_to_excel_bytes(df_hist_visible, sheet_name="Historico")
     if excel_bytes_h:
@@ -904,11 +971,14 @@ with tab_config:
     saldos_init = get_saldos_iniciales()
     df_conf = pd.DataFrame({
         "cuenta": CUENTAS,
-        "saldo_inicial": [saldos_init[c] for c in CUENTAS],
+        "saldo_inicial": [saldos_init.get(c, 0.0) for c in CUENTAS],
     })
+
+    st.caption("Edita saldos y pulsa **Guardar saldos**. (No se guardan al vuelo para evitar sobresaltos).")
 
     df_conf_edit = st.data_editor(
         df_conf,
+        hide_index=True,
         num_rows="fixed",
         use_container_width=True,
         key="editor_saldos_iniciales",
@@ -918,9 +988,10 @@ with tab_config:
         },
     )
 
-    for _, row in df_conf_edit.iterrows():
-        cuenta = row["cuenta"]
-        saldo = row["saldo_inicial"] or 0.0
-        update_saldo_inicial(cuenta, saldo)
-
-    st.success("Saldos iniciales actualizados ✅")
+    if st.button("💾 Guardar saldos", key="save_saldos"):
+        for _, row in df_conf_edit.iterrows():
+            cuenta = row["cuenta"]
+            saldo = row["saldo_inicial"] or 0.0
+            update_saldo_inicial_upsert(cuenta, saldo)
+        st.success("Saldos iniciales actualizados ✅")
+        st.rerun()
