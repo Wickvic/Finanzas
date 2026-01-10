@@ -382,11 +382,6 @@ def df_to_pdf_bytes(df, title="Datos"):
 
 # ---------- Editor helpers (ID oculto sin columna visible) ----------
 def build_editor_df(df_src: pd.DataFrame, visible_cols: List[str], default_cuenta: str) -> pd.DataFrame:
-    """
-    - Crea df para st.data_editor
-    - Guarda el id real en columna oculta __id
-    - Usa un índice artificial (row_0, row_1...) que no revela ids
-    """
     dfv = df_src.copy()
 
     for c in ["id"] + visible_cols:
@@ -394,20 +389,23 @@ def build_editor_df(df_src: pd.DataFrame, visible_cols: List[str], default_cuent
             dfv[c] = None
 
     dfv = dfv[["id"] + visible_cols].copy()
-    dfv["importe"] = dfv["importe"].apply(lambda x: "" if pd.isna(x) else str(x))
+
+    if "importe" in dfv.columns:
+        dfv["importe"] = dfv["importe"].apply(lambda x: "" if pd.isna(x) else str(x))
+
     dfv["🗑 Eliminar"] = False
 
-    # defaults
-    dfv = aplicar_defaults_df_editor(dfv, default_cuenta=default_cuenta)
+    # defaults (solo si existe 'cuenta')
+    if "cuenta" in dfv.columns:
+        dfv = aplicar_defaults_df_editor(dfv, default_cuenta=default_cuenta)
 
-    # id REAL oculto
+    # id real oculto (clave del guardado)
     dfv["__id"] = dfv["id"].fillna("").astype(str)
     dfv = dfv.drop(columns=["id"])
 
-    # índice artificial (no se mostrará, y aunque se muestre no contiene ids)
+    # índice artificial
     dfv.index = [f"row_{i}" for i in range(len(dfv))]
     dfv.index.name = ""
-
     return dfv
 
 
@@ -446,17 +444,18 @@ def add_duplicate_last_row(df_editor: pd.DataFrame, cols_to_dup: List[str]) -> p
     return tmp
 
 # ---------- PREPARAR PAYLOAD (split upsert/insert) ----------
-def validar_y_preparar_payload_desde_editor(df_edit: pd.DataFrame, modo: str) -> Tuple[List[str], List[dict], List[dict], List[str]]:
+def validar_y_preparar_payload_desde_editor(df_edit: pd.DataFrame, modo: str):
     ids_borrar = []
     rows_upsert = []
     rows_insert = []
     avisos = []
 
     for _, r in df_edit.iterrows():
-        rid = safe_str(r.get("__id", "")).strip()   # <- id real oculto
-        eliminar = bool(r.get("🗑 Eliminar", False))
+        # __id debe venir siempre; si no viene, fallback a vacío (fila nueva)
+        rid = safe_str(r.get("__id", "")).strip()
         es_nueva = (rid == "")
 
+        eliminar = bool(r.get("🗑 Eliminar", False))
         if eliminar:
             if not es_nueva:
                 ids_borrar.append(rid)
@@ -691,8 +690,8 @@ with tab_gastos:
         num_rows="dynamic",
         use_container_width=True,
         key="editor_gastos",
-        column_order=["fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"],
         column_config={
+            "__id": st.column_config.TextColumn("", disabled=True, width="small"),
             "fecha": st.column_config.DateColumn("Fecha", format=DATE_FORMAT),
             "descripcion": st.column_config.TextColumn("Descripción"),
             "categoria": st.column_config.SelectboxColumn("Categoría", options=CATS_GASTOS),
@@ -746,8 +745,8 @@ with tab_ingresos:
         num_rows="dynamic",
         use_container_width=True,
         key="editor_ingresos",
-        column_order=["fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"],
         column_config={
+            "__id": st.column_config.TextColumn("", disabled=True, width="small"),
             "fecha": st.column_config.DateColumn("Fecha", format=DATE_FORMAT),
             "descripcion": st.column_config.TextColumn("Descripción"),
             "categoria": st.column_config.SelectboxColumn("Categoría", options=CATS_INGRESOS),
@@ -799,8 +798,8 @@ with tab_transf:
         num_rows="dynamic",
         use_container_width=True,
         key="editor_transf",
-        column_order=["fecha", "descripcion", "cuenta", "cuenta_destino", "importe", "🗑 Eliminar"],
         column_config={
+            "__id": st.column_config.TextColumn("", disabled=True, width="small"),
             "fecha": st.column_config.DateColumn("Fecha", format=DATE_FORMAT),
             "descripcion": st.column_config.TextColumn("Descripción"),
             "cuenta": st.column_config.SelectboxColumn("Cuenta origen", options=CUENTAS),
