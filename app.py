@@ -27,7 +27,6 @@ HEADERS = {
     "Prefer": "return=representation",
 }
 
-# Para UPSERT masivo
 HEADERS_UPSERT = {
     **HEADERS,
     "Prefer": "return=representation,resolution=merge-duplicates",
@@ -40,7 +39,7 @@ CUENTAS = [
     "Corto plazo",
     "Medio plazo",
     "Largo plazo",
-    "Efectivo",  # ✅ nueva cuenta
+    "Efectivo",
 ]
 
 CATS_GASTOS = [
@@ -62,30 +61,20 @@ CATS_INGRESOS = [
 
 DB_COLUMNS = ["fecha", "descripcion", "categoria", "cuenta", "cuenta_destino", "importe"]
 
-# Meses con nombres
 MESES_NOMBRES = {
-    1: "Enero",
-    2: "Febrero",
-    3: "Marzo",
-    4: "Abril",
-    5: "Mayo",
-    6: "Junio",
-    7: "Julio",
-    8: "Agosto",
-    9: "Septiembre",
-    10: "Octubre",
-    11: "Noviembre",
-    12: "Diciembre",
+    1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril", 5: "Mayo", 6: "Junio",
+    7: "Julio", 8: "Agosto", 9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre",
 }
+
+DATE_FORMAT = "DD/MM/YYYY"
 
 
 def nombre_mes(m):
     return MESES_NOMBRES.get(m, str(m))
 
 
-# ---------- UTIL: IMPORTE (coma o punto) ----------
+# ---------- UTIL: parse coma/punto ----------
 def parse_importe(v):
-    """Acepta 12.34, 12,34, 1.234,56, etc. Devuelve float o None."""
     if v is None:
         return None
     if isinstance(v, (int, float)):
@@ -110,7 +99,6 @@ def parse_importe(v):
 def normalizar_fecha(valor):
     from datetime import date as _date
     import pandas as _pd
-
     if isinstance(valor, _pd.Timestamp):
         return valor.date().isoformat()
     if isinstance(valor, _date):
@@ -118,115 +106,121 @@ def normalizar_fecha(valor):
     return valor
 
 
-# ---------- FUNCIONES SUPABASE ----------
+# ---------- SUPABASE ----------
 def get_table(table):
     url = f"{BASE_URL}/{table}"
-    params = {"select": "*"}
-    r = requests.get(url, headers=HEADERS, params=params, timeout=30)
+    r = requests.get(url, headers=HEADERS, params={"select": "*"}, timeout=30)
     r.raise_for_status()
     return r.json()
 
 
 def get_movimientos():
     url = f"{BASE_URL}/{TABLE_MOV}"
-    params = {"select": "*", "order": "fecha.asc"}
-    r = requests.get(url, headers=HEADERS, params=params, timeout=30)
+    r = requests.get(url, headers=HEADERS, params={"select": "*", "order": "fecha.asc"}, timeout=30)
     r.raise_for_status()
     return r.json()
 
 
 def insert_movimientos_bulk(rows):
-    """Inserta en bloque (sin id)."""
     if not rows:
         return []
     url = f"{BASE_URL}/{TABLE_MOV}"
     r = requests.post(url, headers=HEADERS, json=rows, timeout=30)
+    st.write("INSERT status:", r.status_code)
     if r.status_code >= 400:
-        st.error(f"Error al insertar (bulk) ({r.status_code}): {r.text}")
+        st.error(f"INSERT ERROR: {r.status_code}")
+        st.code(r.text)
+        return None
+    if not r.text:
+        st.warning("INSERT OK pero sin body")
         return []
-    return r.json() if r.text else []
+    return r.json()
 
 
 def upsert_movimientos_bulk(rows):
-    """UPSERT en bloque usando on_conflict=id (filas con id se actualizan; sin id se insertan)."""
     if not rows:
         return []
     url = f"{BASE_URL}/{TABLE_MOV}?on_conflict=id"
     r = requests.post(url, headers=HEADERS_UPSERT, json=rows, timeout=30)
+
+    # DEBUG duro
+    st.write("UPSERT status:", r.status_code)
     if r.status_code >= 400:
-        st.error(f"Error al upsert (bulk) ({r.status_code}): {r.text}")
+        st.error(f"UPSERT ERROR: {r.status_code}")
+        st.code(r.text)
+        return None
+
+    if not r.text:
+        st.warning("UPSERT OK pero sin body (r.text vacío)")
         return []
-    return r.json() if r.text else []
+
+    try:
+        return r.json()
+    except Exception:
+        st.warning("UPSERT OK pero respuesta no es JSON")
+        st.code(r.text)
+        return []
 
 
 def delete_movimientos_bulk(ids):
-    """Borrado en bloque por ids."""
     ids = [str(i) for i in ids if i]
     if not ids:
         return True
     url = f"{BASE_URL}/{TABLE_MOV}"
     params = {"id": f"in.({','.join(ids)})"}
     r = requests.delete(url, headers=HEADERS, params=params, timeout=30)
+    st.write("DELETE status:", r.status_code)
     if r.status_code >= 400:
-        st.error(f"Error al borrar (bulk) ({r.status_code}): {r.text}")
+        st.error(f"DELETE ERROR: {r.status_code}")
+        st.code(r.text)
         return False
     return True
 
 
 def update_saldo_inicial_upsert(cuenta, saldo):
-    """Upsert manual para saldos_iniciales: si no existe, lo crea."""
     url = f"{BASE_URL}/{TABLE_SALDOS}"
-
-    # ¿Existe?
     r0 = requests.get(url, headers=HEADERS, params={"select": "*", "cuenta": f"eq.{cuenta}"}, timeout=30)
     r0.raise_for_status()
     existe = len(r0.json()) > 0
 
     if existe:
         r = requests.patch(
-            url,
-            headers=HEADERS,
-            params={"cuenta": f"eq.{cuenta}"},
-            json={"saldo_inicial": float(saldo)},
-            timeout=30
+            url, headers=HEADERS, params={"cuenta": f"eq.{cuenta}"},
+            json={"saldo_inicial": float(saldo)}, timeout=30
         )
     else:
         r = requests.post(
-            url,
-            headers=HEADERS,
-            json={"cuenta": cuenta, "saldo_inicial": float(saldo)},
-            timeout=30
+            url, headers=HEADERS,
+            json={"cuenta": cuenta, "saldo_inicial": float(saldo)}, timeout=30
         )
 
     if r.status_code >= 400:
+        st.error(f"SALDOS ERROR: {r.status_code}")
+        st.code(r.text)
         r.raise_for_status()
 
 
-# ---------- UTILIDADES DATA ----------
+# ---------- DATA ----------
 def preparar_dataframe_base():
     rows = get_movimientos()
     df = pd.DataFrame(rows) if rows else pd.DataFrame([])
 
-    # Asegurar columnas
     for col in ["id"] + DB_COLUMNS:
         if col not in df.columns:
             df[col] = None
 
-    # Fecha robusta
     df["fecha_dt"] = pd.to_datetime(df["fecha"], errors="coerce")
     df["fecha"] = df["fecha_dt"].dt.date
     df["anio"] = df["fecha_dt"].dt.year
     df["mes"] = df["fecha_dt"].dt.month
 
-    # Asegurar tipos
     df["descripcion"] = df["descripcion"].fillna("").astype(str)
     df["categoria"] = df["categoria"].fillna("").astype(str)
     df["cuenta"] = df["cuenta"].fillna("").astype(str)
     df["cuenta_destino"] = df["cuenta_destino"].where(df["cuenta_destino"].notna(), None)
 
-    # importe como float (para cálculos). Si viene raro, lo dejamos NaN.
     def _to_float(x):
-        if x is None or (isinstance(x, str) and x.strip() == ""):
+        if x is None:
             return float("nan")
         try:
             return float(x)
@@ -246,10 +240,10 @@ def get_saldos_iniciales():
         df = pd.DataFrame(rows)
         saldos = {c: 0.0 for c in CUENTAS}
         for _, row in df.iterrows():
-            cuenta = row.get("cuenta")
-            saldo = float(row.get("saldo_inicial") or 0)
-            if cuenta in saldos:
-                saldos[cuenta] = saldo
+            c = row.get("cuenta")
+            s = float(row.get("saldo_inicial") or 0)
+            if c in saldos:
+                saldos[c] = s
         return saldos
     except Exception:
         return {c: 0.0 for c in CUENTAS}
@@ -264,15 +258,12 @@ def calcular_saldos_por_cuenta(df):
         destino = row.get("cuenta_destino")
         cat = row.get("categoria")
 
-        # ingresos
         if (destino in (None, "", " ")) and (cat in CATS_INGRESOS):
             if origen in saldos:
                 saldos[origen] += imp
-        # gastos
         elif (destino in (None, "", " ")) and (cat in CATS_GASTOS):
             if origen in saldos:
                 saldos[origen] -= imp
-        # transferencias
         elif destino not in (None, "", " "):
             if origen in saldos:
                 saldos[origen] -= imp
@@ -282,64 +273,24 @@ def calcular_saldos_por_cuenta(df):
     return saldos
 
 
-# ---------- GUARDADO ROBUSTO (solo con botón) ----------
-def build_full_rows_from_editor(df_orig, df_edit_visible, modo):
+# ---------- GUARDADO ROBUSTO (usa el id del editor, no índices) ----------
+def validar_y_preparar_payload_desde_editor(df_edit, modo):
     """
-    Reconstruye filas completas para BD usando posición (reset_index),
-    evitando bugs por índices/filtrado.
+    df_edit contiene 'id' (deshabilitado) + campos visibles + 🗑 Eliminar
     """
-    df_orig = df_orig.reset_index(drop=True)
-    df_edit_visible = df_edit_visible.reset_index(drop=True)
-
-    rows_full = []
-    for i in range(len(df_edit_visible)):
-        base = {}
-        if i < len(df_orig):
-            base = df_orig.loc[i, ["id"] + DB_COLUMNS].to_dict()
-        else:
-            base = {"id": None}
-            for c in DB_COLUMNS:
-                base[c] = None
-
-        # visibles según modo
-        if modo in ("gastos", "ingresos"):
-            base["fecha"] = df_edit_visible.at[i, "fecha"]
-            base["descripcion"] = df_edit_visible.at[i, "descripcion"]
-            base["categoria"] = df_edit_visible.at[i, "categoria"]
-            base["cuenta"] = df_edit_visible.at[i, "cuenta"]
-            base["importe"] = df_edit_visible.at[i, "importe"]
-            base["cuenta_destino"] = None
-        else:  # transferencias
-            base["fecha"] = df_edit_visible.at[i, "fecha"]
-            base["descripcion"] = df_edit_visible.at[i, "descripcion"]
-            base["categoria"] = "Transferencia"
-            base["cuenta"] = df_edit_visible.at[i, "cuenta"]
-            base["cuenta_destino"] = df_edit_visible.at[i, "cuenta_destino"]
-            base["importe"] = df_edit_visible.at[i, "importe"]
-
-        base["_eliminar"] = bool(df_edit_visible.at[i, "🗑 Eliminar"]) if "🗑 Eliminar" in df_edit_visible.columns else False
-        rows_full.append(base)
-
-    return pd.DataFrame(rows_full)
-
-
-def validar_y_preparar_payload(df_full, modo):
-    """
-    Devuelve:
-      - ids_a_borrar (solo marcados con 🗑 y con id)
-      - rows_upsert (lista de dicts para upsert masivo)
-    """
-    ids_a_borrar = []
+    ids_borrar = []
     rows_upsert = []
 
-    for _, r in df_full.iterrows():
-        row_id = r.get("id")
-        if r.get("_eliminar", False):
-            if pd.notna(row_id) and row_id:
-                ids_a_borrar.append(row_id)
+    for _, r in df_edit.iterrows():
+        rid = r.get("id", None)
+        eliminar = bool(r.get("🗑 Eliminar", False))
+
+        # borrar SOLO si lo marca el usuario y hay id
+        if eliminar:
+            if pd.notna(rid) and str(rid).strip() != "":
+                ids_borrar.append(rid)
             continue
 
-        # Validar mínimos
         fecha = r.get("fecha")
         if pd.isna(fecha) or fecha in (None, "", "NaT"):
             continue
@@ -348,39 +299,43 @@ def validar_y_preparar_payload(df_full, modo):
         if imp is None or imp == 0:
             continue
 
+        desc = (r.get("descripcion") or "").strip()
         cuenta = (r.get("cuenta") or "").strip()
+
         if not cuenta:
             continue
+
+        payload = {
+            "fecha": normalizar_fecha(fecha),
+            "descripcion": desc,
+            "cuenta": cuenta,
+            "importe": float(imp),
+        }
 
         if modo in ("gastos", "ingresos"):
             categoria = (r.get("categoria") or "").strip()
             if not categoria:
                 continue
-        else:
-            categoria = "Transferencia"
+            payload["categoria"] = categoria
+            payload["cuenta_destino"] = None
+
+        if modo == "transferencias":
             cuenta_destino = (r.get("cuenta_destino") or "").strip()
             if not cuenta_destino:
                 continue
+            payload["categoria"] = "Transferencia"
+            payload["cuenta_destino"] = cuenta_destino
 
-        payload = {
-            "fecha": normalizar_fecha(fecha),
-            "descripcion": (r.get("descripcion") or "").strip(),
-            "categoria": categoria,
-            "cuenta": cuenta,
-            "cuenta_destino": None if modo in ("gastos", "ingresos") else cuenta_destino,
-            "importe": float(imp),
-        }
-
-        # si ya tiene id, se actualizará en upsert
-        if pd.notna(row_id) and row_id:
-            payload["id"] = row_id
+        # si hay id, será UPDATE por upsert; si no, insert
+        if pd.notna(rid) and str(rid).strip() != "":
+            payload["id"] = rid
 
         rows_upsert.append(payload)
 
-    return ids_a_borrar, rows_upsert
+    return ids_borrar, rows_upsert
 
 
-# ---------- EXPORTAR ----------
+# ---------- EXPORT ----------
 def df_to_excel_bytes(df, sheet_name="Datos"):
     output = io.BytesIO()
     try:
@@ -435,6 +390,7 @@ st.set_page_config(page_title="Finanzas Familiares", layout="wide")
 st.title("Finanzas familiares")
 
 modo_movil = st.sidebar.checkbox("📱 Modo móvil compacto", value=False)
+modo_debug = st.sidebar.checkbox("🧪 Modo debug guardado", value=True)
 
 try:
     df_base = preparar_dataframe_base()
@@ -445,11 +401,30 @@ except Exception as e:
 anios_disponibles = sorted([int(a) for a in df_base["anio"].dropna().unique()], reverse=True) or [date.today().year]
 meses_disponibles = list(range(1, 13))
 
-tab_gastos, tab_ingresos, tab_transf, tab_balances, tab_hist, tab_config = st.tabs(
-    ["💸 Gastos", "💰 Ingresos", "🔁 Transferencias", "📊 Balances", "📚 Histórico completo", "⚙️ Configuración"]
+tab_gastos, tab_ingresos, tab_transf, tab_balances, tab_hist, tab_config, tab_debug = st.tabs(
+    ["💸 Gastos", "💰 Ingresos", "🔁 Transferencias", "📊 Balances", "📚 Histórico", "⚙️ Config", "🧪 Debug"]
 )
 
-DATE_FORMAT = "DD/MM/YYYY"
+# ---------- TAB DEBUG (test insert directo) ----------
+with tab_debug:
+    st.subheader("🧪 Debug Supabase")
+    st.write("RLS desactivado: esto debería insertar sí o sí.")
+    if st.button("🧪 Test Insert directo (1€ en Principal/Cesta)"):
+        test = [{
+            "fecha": date.today().isoformat(),
+            "descripcion": "TEST",
+            "categoria": "Cesta",
+            "cuenta": "Principal",
+            "cuenta_destino": None,
+            "importe": 1.23,
+        }]
+        res = insert_movimientos_bulk(test)
+        st.write("Respuesta:", res)
+
+    st.markdown("---")
+    st.write("Primeras 5 filas cargadas desde Supabase:")
+    st.dataframe(df_base.head(5), use_container_width=True, hide_index=True)
+
 
 # ---------- TAB GASTOS ----------
 with tab_gastos:
@@ -457,25 +432,17 @@ with tab_gastos:
 
     if modo_movil:
         anio_g = st.selectbox("Año", anios_disponibles, key="anio_g_m")
-        mes_g = st.selectbox(
-            "Mes",
-            ["Todos"] + meses_disponibles,
-            key="mes_g_m",
-            format_func=lambda x: "Todos" if x == "Todos" else nombre_mes(x),
-        )
+        mes_g = st.selectbox("Mes", ["Todos"] + meses_disponibles, key="mes_g_m",
+                             format_func=lambda x: "Todos" if x == "Todos" else nombre_mes(x))
         texto_g = st.text_input("Buscar en descripción", key="busca_g_m")
     else:
-        col_f1, col_f2, col_f3 = st.columns(3)
-        with col_f1:
+        c1, c2, c3 = st.columns(3)
+        with c1:
             anio_g = st.selectbox("Año", anios_disponibles, key="anio_g")
-        with col_f2:
-            mes_g = st.selectbox(
-                "Mes",
-                ["Todos"] + meses_disponibles,
-                key="mes_g",
-                format_func=lambda x: "Todos" if x == "Todos" else nombre_mes(x),
-            )
-        with col_f3:
+        with c2:
+            mes_g = st.selectbox("Mes", ["Todos"] + meses_disponibles, key="mes_g",
+                                 format_func=lambda x: "Todos" if x == "Todos" else nombre_mes(x))
+        with c3:
             texto_g = st.text_input("Buscar en descripción", key="busca_g")
 
     df_g = df_base.copy()
@@ -491,32 +458,31 @@ with tab_gastos:
 
     if df_g.empty:
         df_g = pd.DataFrame([{
-            "id": None,
+            "id": "",
             "fecha": None,
             "descripcion": "",
             "categoria": "",
             "cuenta": "",
             "cuenta_destino": None,
-            "importe": float("nan"),
+            "importe": "",
         }])
 
-    df_g_orig = df_g.copy().reset_index(drop=True)
-
-    visible_g = ["fecha", "descripcion", "categoria", "cuenta", "importe"]
-    df_g_visible = df_g_orig[visible_g].copy()
-    # Mostrar importe como texto para evitar que "Enter" lo borre si hay coma
+    # EDITOR (incluye id deshabilitado para evitar desorden de filas)
+    visible = ["id", "fecha", "descripcion", "categoria", "cuenta", "importe"]
+    df_g_visible = df_g[visible].copy()
     df_g_visible["importe"] = df_g_visible["importe"].apply(lambda x: "" if pd.isna(x) else str(x))
     df_g_visible["🗑 Eliminar"] = False
 
-    st.caption("💡 Tip: puedes escribir importes con coma o punto (12,50 o 12.50). Pulsa **Guardar cambios** para enviar a Supabase.")
+    st.caption("✅ Importes con coma o punto. Guarda con el botón (no se borra nada por reruns).")
 
-    df_g_edit_visible = st.data_editor(
+    df_g_edit = st.data_editor(
         df_g_visible,
-        hide_index=True,  # ✅ oculta el numerito del índice
+        hide_index=True,
         num_rows="dynamic",
         use_container_width=True,
         key="editor_gastos",
         column_config={
+            "id": st.column_config.TextColumn("id", disabled=True),
             "fecha": st.column_config.DateColumn("Fecha", format=DATE_FORMAT),
             "categoria": st.column_config.SelectboxColumn("Categoría", options=CATS_GASTOS),
             "cuenta": st.column_config.SelectboxColumn("Cuenta", options=CUENTAS),
@@ -525,53 +491,30 @@ with tab_gastos:
         },
     )
 
-    # Total vista actual (parseando importe)
-    total_g = 0.0
-    for v in df_g_edit_visible["importe"].tolist():
-        imp = parse_importe(v)
-        total_g += float(imp or 0)
-    st.metric("Total gastos (vista actual)", f"{total_g:,.2f} €")
+    # total visible
+    total = sum(float(parse_importe(x) or 0) for x in df_g_edit["importe"].tolist())
+    st.metric("Total gastos (vista actual)", f"{total:,.2f} €")
 
-    if st.button("💾 Guardar cambios", key="save_gastos"):
-        df_full = build_full_rows_from_editor(df_g_orig, df_g_edit_visible, modo="gastos")
-        ids_borrar, rows_upsert = validar_y_preparar_payload(df_full, modo="gastos")
+    if st.button("💾 Guardar cambios (Gastos)", key="save_gastos"):
+        ids_borrar, rows_upsert = validar_y_preparar_payload_desde_editor(df_g_edit, modo="gastos")
 
-        ok_del = delete_movimientos_bulk(ids_borrar)
-        _ = upsert_movimientos_bulk(rows_upsert)  # bulk upsert (1 request)
-        if ok_del:
-            st.success("Guardado en Supabase ✅")
-        st.rerun()
+        if modo_debug:
+            st.write("Filas en editor:", len(df_g_edit))
+            st.write("IDs a borrar:", ids_borrar)
+            st.write("Filas válidas para guardar:", len(rows_upsert))
+            st.json(rows_upsert[:10])
 
-    export_g = df_g_edit_visible[["fecha", "descripcion", "categoria", "cuenta", "importe"]].copy()
-    # Normalizar importe export
-    export_g["importe"] = export_g["importe"].apply(lambda x: parse_importe(x) or 0.0)
+        ok = delete_movimientos_bulk(ids_borrar)
+        res = upsert_movimientos_bulk(rows_upsert)
 
-    col_e1, col_e2 = st.columns(2)
-    with col_e1:
-        mes_nombre_g = "todos" if mes_g == "Todos" else nombre_mes(mes_g).lower()
-        excel_bytes = df_to_excel_bytes(export_g, sheet_name="Gastos")
-        if excel_bytes:
-            st.download_button(
-                "⬇️ Exportar gastos a Excel",
-                data=excel_bytes,
-                file_name=f"gastos_{anio_g}_{mes_nombre_g}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+        if res is None:
+            st.error("No se pudo guardar (mira el error arriba).")
         else:
-            st.caption("Para exportar a Excel, instala 'openpyxl' o 'xlsxwriter' en el entorno de Streamlit.")
+            st.success(f"Guardado ✅ (Supabase devolvió {len(res)} filas)")
 
-    with col_e2:
-        mes_nombre_g = "todos" if mes_g == "Todos" else nombre_mes(mes_g).lower()
-        pdf_bytes = df_to_pdf_bytes(export_g, title="Gastos filtrados")
-        if pdf_bytes:
-            st.download_button(
-                "⬇️ Exportar gastos a PDF",
-                data=pdf_bytes,
-                file_name=f"gastos_{anio_g}_{mes_nombre_g}.pdf",
-                mime="application/pdf",
-            )
-        else:
-            st.caption("Para exportar a PDF, instala 'reportlab' en el entorno de Streamlit.")
+        # NO rerun en modo debug para ver salida
+        if not modo_debug:
+            st.rerun()
 
 
 # ---------- TAB INGRESOS ----------
@@ -580,25 +523,17 @@ with tab_ingresos:
 
     if modo_movil:
         anio_i = st.selectbox("Año", anios_disponibles, key="anio_i_m")
-        mes_i = st.selectbox(
-            "Mes",
-            ["Todos"] + meses_disponibles,
-            key="mes_i_m",
-            format_func=lambda x: "Todos" if x == "Todos" else nombre_mes(x),
-        )
+        mes_i = st.selectbox("Mes", ["Todos"] + meses_disponibles, key="mes_i_m",
+                             format_func=lambda x: "Todos" if x == "Todos" else nombre_mes(x))
         texto_i = st.text_input("Buscar en descripción", key="busca_i_m")
     else:
-        col_f1, col_f2, col_f3 = st.columns(3)
-        with col_f1:
+        c1, c2, c3 = st.columns(3)
+        with c1:
             anio_i = st.selectbox("Año", anios_disponibles, key="anio_i")
-        with col_f2:
-            mes_i = st.selectbox(
-                "Mes",
-                ["Todos"] + meses_disponibles,
-                key="mes_i",
-                format_func=lambda x: "Todos" if x == "Todos" else nombre_mes(x),
-            )
-        with col_f3:
+        with c2:
+            mes_i = st.selectbox("Mes", ["Todos"] + meses_disponibles, key="mes_i",
+                                 format_func=lambda x: "Todos" if x == "Todos" else nombre_mes(x))
+        with c3:
             texto_i = st.text_input("Buscar en descripción", key="busca_i")
 
     df_i = df_base.copy()
@@ -614,31 +549,28 @@ with tab_ingresos:
 
     if df_i.empty:
         df_i = pd.DataFrame([{
-            "id": None,
+            "id": "",
             "fecha": None,
             "descripcion": "",
             "categoria": "",
             "cuenta": "",
             "cuenta_destino": None,
-            "importe": float("nan"),
+            "importe": "",
         }])
 
-    df_i_orig = df_i.copy().reset_index(drop=True)
-
-    visible_i = ["fecha", "descripcion", "categoria", "cuenta", "importe"]
-    df_i_visible = df_i_orig[visible_i].copy()
+    visible = ["id", "fecha", "descripcion", "categoria", "cuenta", "importe"]
+    df_i_visible = df_i[visible].copy()
     df_i_visible["importe"] = df_i_visible["importe"].apply(lambda x: "" if pd.isna(x) else str(x))
     df_i_visible["🗑 Eliminar"] = False
 
-    st.caption("💡 Importes con coma o punto. Pulsa **Guardar cambios** para enviar a Supabase.")
-
-    df_i_edit_visible = st.data_editor(
+    df_i_edit = st.data_editor(
         df_i_visible,
         hide_index=True,
         num_rows="dynamic",
         use_container_width=True,
         key="editor_ingresos",
         column_config={
+            "id": st.column_config.TextColumn("id", disabled=True),
             "fecha": st.column_config.DateColumn("Fecha", format=DATE_FORMAT),
             "categoria": st.column_config.SelectboxColumn("Categoría", options=CATS_INGRESOS),
             "cuenta": st.column_config.SelectboxColumn("Cuenta", options=CUENTAS),
@@ -647,78 +579,47 @@ with tab_ingresos:
         },
     )
 
-    total_i = 0.0
-    for v in df_i_edit_visible["importe"].tolist():
-        imp = parse_importe(v)
-        total_i += float(imp or 0)
-    st.metric("Total ingresos (vista actual)", f"{total_i:,.2f} €")
+    total = sum(float(parse_importe(x) or 0) for x in df_i_edit["importe"].tolist())
+    st.metric("Total ingresos (vista actual)", f"{total:,.2f} €")
 
-    if st.button("💾 Guardar cambios", key="save_ingresos"):
-        df_full = build_full_rows_from_editor(df_i_orig, df_i_edit_visible, modo="ingresos")
-        ids_borrar, rows_upsert = validar_y_preparar_payload(df_full, modo="ingresos")
+    if st.button("💾 Guardar cambios (Ingresos)", key="save_ingresos"):
+        ids_borrar, rows_upsert = validar_y_preparar_payload_desde_editor(df_i_edit, modo="ingresos")
 
-        ok_del = delete_movimientos_bulk(ids_borrar)
-        _ = upsert_movimientos_bulk(rows_upsert)
-        if ok_del:
-            st.success("Guardado en Supabase ✅")
-        st.rerun()
+        if modo_debug:
+            st.write("Filas en editor:", len(df_i_edit))
+            st.write("IDs a borrar:", ids_borrar)
+            st.write("Filas válidas para guardar:", len(rows_upsert))
+            st.json(rows_upsert[:10])
 
-    export_i = df_i_edit_visible[["fecha", "descripcion", "categoria", "cuenta", "importe"]].copy()
-    export_i["importe"] = export_i["importe"].apply(lambda x: parse_importe(x) or 0.0)
+        ok = delete_movimientos_bulk(ids_borrar)
+        res = upsert_movimientos_bulk(rows_upsert)
 
-    col_e1, col_e2 = st.columns(2)
-    with col_e1:
-        mes_nombre_i = "todos" if mes_i == "Todos" else nombre_mes(mes_i).lower()
-        excel_bytes_i = df_to_excel_bytes(export_i, sheet_name="Ingresos")
-        if excel_bytes_i:
-            st.download_button(
-                "⬇️ Exportar ingresos a Excel",
-                data=excel_bytes_i,
-                file_name=f"ingresos_{anio_i}_{mes_nombre_i}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+        if res is None:
+            st.error("No se pudo guardar (mira el error arriba).")
         else:
-            st.caption("Para exportar a Excel, instala 'openpyxl' o 'xlsxwriter' en el entorno de Streamlit.")
+            st.success(f"Guardado ✅ (Supabase devolvió {len(res)} filas)")
 
-    with col_e2:
-        mes_nombre_i = "todos" if mes_i == "Todos" else nombre_mes(mes_i).lower()
-        pdf_bytes_i = df_to_pdf_bytes(export_i, title="Ingresos filtrados")
-        if pdf_bytes_i:
-            st.download_button(
-                "⬇️ Exportar ingresos a PDF",
-                data=pdf_bytes_i,
-                file_name=f"ingresos_{anio_i}_{mes_nombre_i}.pdf",
-                mime="application/pdf",
-            )
-        else:
-            st.caption("Para exportar a PDF, instala 'reportlab' en el entorno de Streamlit.")
+        if not modo_debug:
+            st.rerun()
 
 
 # ---------- TAB TRANSFERENCIAS ----------
 with tab_transf:
-    st.subheader("Transferencias entre cuentas")
+    st.subheader("Transferencias")
 
     if modo_movil:
         anio_t = st.selectbox("Año", anios_disponibles, key="anio_t_m")
-        mes_t = st.selectbox(
-            "Mes",
-            ["Todos"] + meses_disponibles,
-            key="mes_t_m",
-            format_func=lambda x: "Todos" if x == "Todos" else nombre_mes(x),
-        )
+        mes_t = st.selectbox("Mes", ["Todos"] + meses_disponibles, key="mes_t_m",
+                             format_func=lambda x: "Todos" if x == "Todos" else nombre_mes(x))
         texto_t = st.text_input("Buscar en descripción", key="busca_t_m")
     else:
-        col_f1, col_f2, col_f3 = st.columns(3)
-        with col_f1:
+        c1, c2, c3 = st.columns(3)
+        with c1:
             anio_t = st.selectbox("Año", anios_disponibles, key="anio_t")
-        with col_f2:
-            mes_t = st.selectbox(
-                "Mes",
-                ["Todos"] + meses_disponibles,
-                key="mes_t",
-                format_func=lambda x: "Todos" if x == "Todos" else nombre_mes(x),
-            )
-        with col_f3:
+        with c2:
+            mes_t = st.selectbox("Mes", ["Todos"] + meses_disponibles, key="mes_t",
+                                 format_func=lambda x: "Todos" if x == "Todos" else nombre_mes(x))
+        with c3:
             texto_t = st.text_input("Buscar en descripción", key="busca_t")
 
     df_t = df_base.copy()
@@ -733,31 +634,28 @@ with tab_transf:
 
     if df_t.empty:
         df_t = pd.DataFrame([{
-            "id": None,
+            "id": "",
             "fecha": None,
             "descripcion": "",
             "categoria": "Transferencia",
             "cuenta": "",
             "cuenta_destino": "",
-            "importe": float("nan"),
+            "importe": "",
         }])
 
-    df_t_orig = df_t.copy().reset_index(drop=True)
-
-    visible_t = ["fecha", "descripcion", "cuenta", "cuenta_destino", "importe"]
-    df_t_visible = df_t_orig[visible_t].copy()
+    visible = ["id", "fecha", "descripcion", "cuenta", "cuenta_destino", "importe"]
+    df_t_visible = df_t[visible].copy()
     df_t_visible["importe"] = df_t_visible["importe"].apply(lambda x: "" if pd.isna(x) else str(x))
     df_t_visible["🗑 Eliminar"] = False
 
-    st.caption("💡 Importes con coma o punto. Pulsa **Guardar cambios** para enviar a Supabase.")
-
-    df_t_edit_visible = st.data_editor(
+    df_t_edit = st.data_editor(
         df_t_visible,
         hide_index=True,
         num_rows="dynamic",
         use_container_width=True,
         key="editor_transf",
         column_config={
+            "id": st.column_config.TextColumn("id", disabled=True),
             "fecha": st.column_config.DateColumn("Fecha", format=DATE_FORMAT),
             "cuenta": st.column_config.SelectboxColumn("Cuenta origen", options=CUENTAS),
             "cuenta_destino": st.column_config.SelectboxColumn("Cuenta destino", options=CUENTAS),
@@ -766,154 +664,65 @@ with tab_transf:
         },
     )
 
-    if st.button("💾 Guardar cambios", key="save_transf"):
-        df_full = build_full_rows_from_editor(df_t_orig, df_t_edit_visible, modo="transferencias")
-        ids_borrar, rows_upsert = validar_y_preparar_payload(df_full, modo="transferencias")
+    if st.button("💾 Guardar cambios (Transferencias)", key="save_transf"):
+        ids_borrar, rows_upsert = validar_y_preparar_payload_desde_editor(df_t_edit, modo="transferencias")
 
-        ok_del = delete_movimientos_bulk(ids_borrar)
-        _ = upsert_movimientos_bulk(rows_upsert)
-        if ok_del:
-            st.success("Guardado en Supabase ✅")
-        st.rerun()
+        if modo_debug:
+            st.write("Filas en editor:", len(df_t_edit))
+            st.write("IDs a borrar:", ids_borrar)
+            st.write("Filas válidas para guardar:", len(rows_upsert))
+            st.json(rows_upsert[:10])
 
-    export_t = df_t_edit_visible[["fecha", "descripcion", "cuenta", "cuenta_destino", "importe"]].copy()
-    export_t["importe"] = export_t["importe"].apply(lambda x: parse_importe(x) or 0.0)
+        ok = delete_movimientos_bulk(ids_borrar)
+        res = upsert_movimientos_bulk(rows_upsert)
 
-    col_e1, col_e2 = st.columns(2)
-    with col_e1:
-        mes_nombre_t = "todos" if mes_t == "Todos" else nombre_mes(mes_t).lower()
-        excel_bytes_t = df_to_excel_bytes(export_t, sheet_name="Transferencias")
-        if excel_bytes_t:
-            st.download_button(
-                "⬇️ Exportar transferencias a Excel",
-                data=excel_bytes_t,
-                file_name=f"transferencias_{anio_t}_{mes_nombre_t}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+        if res is None:
+            st.error("No se pudo guardar (mira el error arriba).")
         else:
-            st.caption("Para exportar a Excel, instala 'openpyxl' o 'xlsxwriter' en el entorno de Streamlit.")
+            st.success(f"Guardado ✅ (Supabase devolvió {len(res)} filas)")
 
-    with col_e2:
-        mes_nombre_t = "todos" if mes_t == "Todos" else nombre_mes(mes_t).lower()
-        pdf_bytes_t = df_to_pdf_bytes(export_t, title="Transferencias filtradas")
-        if pdf_bytes_t:
-            st.download_button(
-                "⬇️ Exportar transferencias a PDF",
-                data=pdf_bytes_t,
-                file_name=f"transferencias_{anio_t}_{mes_nombre_t}.pdf",
-                mime="application/pdf",
-            )
-        else:
-            st.caption("Para exportar a PDF, instala 'reportlab' en el entorno de Streamlit.")
+        if not modo_debug:
+            st.rerun()
 
 
 # ---------- TAB BALANCES ----------
 with tab_balances:
-    st.subheader("📊 Balances por año y saldos por cuenta")
+    st.subheader("📊 Balances")
 
-    anios_balances = sorted([a for a in anios_disponibles if a >= 2026], reverse=True) or anios_disponibles
-    anio_b = st.selectbox("Año para análisis", anios_balances, key="anio_bal")
-    meses_sel_bal = st.multiselect(
-        "Meses a visualizar",
-        options=meses_disponibles,
-        default=meses_disponibles,
-        key="meses_bal",
-        format_func=nombre_mes,
-    )
+    anio_b = st.selectbox("Año", anios_disponibles, key="anio_bal")
+    meses_sel = st.multiselect("Meses", options=meses_disponibles, default=meses_disponibles, format_func=nombre_mes)
 
-    df_b = df_base[(df_base["anio"] == anio_b) & (df_base["mes"].isin(meses_sel_bal))].copy()
+    df_b = df_base[(df_base["anio"] == anio_b) & (df_base["mes"].isin(meses_sel))].copy()
 
-    df_g_b = df_b[
-        (df_b["cuenta_destino"].isin([None, "", " "])) &
-        (df_b["categoria"].isin(CATS_GASTOS))
-    ]
-    df_i_b = df_b[
-        (df_b["cuenta_destino"].isin([None, "", " "])) &
-        (df_b["categoria"].isin(CATS_INGRESOS))
-    ]
+    df_g_b = df_b[(df_b["cuenta_destino"].isin([None, "", " "])) & (df_b["categoria"].isin(CATS_GASTOS))]
+    df_i_b = df_b[(df_b["cuenta_destino"].isin([None, "", " "])) & (df_b["categoria"].isin(CATS_INGRESOS))]
 
-    total_g_anual = float(df_g_b["importe"].fillna(0).sum())
-    total_i_anual = float(df_i_b["importe"].fillna(0).sum())
-    ahorro_anual = total_i_anual - total_g_anual
+    total_g = float(df_g_b["importe"].fillna(0).sum())
+    total_i = float(df_i_b["importe"].fillna(0).sum())
 
-    if modo_movil:
-        st.metric("Ingresos (meses seleccionados)", f"{total_i_anual:,.2f} €")
-        st.metric("Gastos (meses seleccionados)", f"{total_g_anual:,.2f} €")
-        st.metric("Ahorro (meses seleccionados)", f"{ahorro_anual:,.2f} €")
-    else:
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.metric("Ingresos (meses seleccionados)", f"{total_i_anual:,.2f} €")
-        with c2:
-            st.metric("Gastos (meses seleccionados)", f"{total_g_anual:,.2f} €")
-        with c3:
-            st.metric("Ahorro (meses seleccionados)", f"{ahorro_anual:,.2f} €")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Ingresos", f"{total_i:,.2f} €")
+    c2.metric("Gastos", f"{total_g:,.2f} €")
+    c3.metric("Ahorro", f"{(total_i-total_g):,.2f} €")
 
-    st.markdown("**Saldos por cuenta (hasta el final del año seleccionado)**")
-    df_saldos_base = df_base[df_base["anio"] <= anio_b].copy()
-    saldos = calcular_saldos_por_cuenta(df_saldos_base)
+    st.markdown("**Saldos por cuenta (hasta fin del año)**")
+    saldos = calcular_saldos_por_cuenta(df_base[df_base["anio"] <= anio_b])
     df_saldos = pd.DataFrame([{"Cuenta": c, "Saldo": saldos.get(c, 0.0)} for c in CUENTAS])
-
-    if modo_movil:
-        st.dataframe(df_saldos, use_container_width=True, hide_index=True)
-        st.bar_chart(df_saldos.set_index("Cuenta")["Saldo"])
-    else:
-        col_s1, col_s2 = st.columns([2, 1])
-        with col_s1:
-            st.dataframe(df_saldos, use_container_width=True, hide_index=True)
-        with col_s2:
-            st.bar_chart(df_saldos.set_index("Cuenta")["Saldo"])
-
-    st.markdown("---")
-
-    if modo_movil:
-        st.markdown("**Gasto por categoría**")
-        if not df_g_b.empty:
-            gastos_cat = df_g_b.groupby("categoria")["importe"].sum().sort_values(ascending=False)
-            st.bar_chart(gastos_cat)
-        else:
-            st.info("No hay gastos para el filtro seleccionado.")
-
-        st.markdown("**Ingresos por categoría**")
-        if not df_i_b.empty:
-            ingresos_cat = df_i_b.groupby("categoria")["importe"].sum().sort_values(ascending=False)
-            st.bar_chart(ingresos_cat)
-        else:
-            st.info("No hay ingresos para el filtro seleccionado.")
-    else:
-        col_graf1, col_graf2 = st.columns(2)
-        with col_graf1:
-            st.markdown("**Gasto por categoría**")
-            if not df_g_b.empty:
-                gastos_cat = df_g_b.groupby("categoria")["importe"].sum().sort_values(ascending=False)
-                st.bar_chart(gastos_cat)
-            else:
-                st.info("No hay gastos para el filtro seleccionado.")
-        with col_graf2:
-            st.markdown("**Ingresos por categoría**")
-            if not df_i_b.empty:
-                ingresos_cat = df_i_b.groupby("categoria")["importe"].sum().sort_values(ascending=False)
-                st.bar_chart(ingresos_cat)
-            else:
-                st.info("No hay ingresos para el filtro seleccionado.")
+    st.dataframe(df_saldos, use_container_width=True, hide_index=True)
 
 
-# ---------- TAB HISTÓRICO COMPLETO ----------
+# ---------- TAB HISTÓRICO ----------
 with tab_hist:
-    st.subheader("📚 Histórico completo de movimientos")
+    st.subheader("📚 Histórico")
 
-    colh1, colh2, colh3 = st.columns(3)
-    with colh1:
+    c1, c2, c3 = st.columns(3)
+    with c1:
         anio_h = st.selectbox("Año", ["Todos"] + list(anios_disponibles), key="anio_hist")
-    with colh2:
-        mes_h = st.selectbox(
-            "Mes",
-            ["Todos"] + meses_disponibles,
-            key="mes_hist",
-            format_func=lambda x: "Todos" if x == "Todos" else nombre_mes(x),
-        )
-    with colh3:
-        texto_h = st.text_input("Buscar", key="busca_hist", placeholder="Descripción, categoría, cuenta...")
+    with c2:
+        mes_h = st.selectbox("Mes", ["Todos"] + meses_disponibles, key="mes_hist",
+                             format_func=lambda x: "Todos" if x == "Todos" else nombre_mes(x))
+    with c3:
+        texto_h = st.text_input("Buscar", key="busca_hist")
 
     df_h = df_base.copy()
 
@@ -936,37 +745,13 @@ with tab_hist:
         df_h = df_h[df_h.apply(lambda r: texto_h.lower() in str(r).lower(), axis=1)]
 
     st.write("Movimientos encontrados:", len(df_h))
-
-    columnas_hist = ["fecha", "tipo", "descripcion", "categoria", "cuenta", "cuenta_destino", "importe"]
-    df_hist_visible = df_h[columnas_hist].sort_values("fecha").copy()
-    st.dataframe(df_hist_visible, use_container_width=True, hide_index=True)
-
-    excel_bytes_h = df_to_excel_bytes(df_hist_visible, sheet_name="Historico")
-    if excel_bytes_h:
-        st.download_button(
-            "⬇️ Exportar histórico a Excel",
-            data=excel_bytes_h,
-            file_name="historico.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-    else:
-        st.caption("Para exportar histórico a Excel, instala 'openpyxl' o 'xlsxwriter' en el entorno de Streamlit.")
-
-    pdf_bytes_h = df_to_pdf_bytes(df_hist_visible, title="Histórico completo")
-    if pdf_bytes_h:
-        st.download_button(
-            "⬇️ Exportar histórico a PDF",
-            data=pdf_bytes_h,
-            file_name="historico.pdf",
-            mime="application/pdf",
-        )
-    else:
-        st.caption("Para exportar a PDF, instala 'reportlab' en el entorno de Streamlit.")
+    columnas = ["fecha", "tipo", "descripcion", "categoria", "cuenta", "cuenta_destino", "importe"]
+    st.dataframe(df_h[columnas].sort_values("fecha"), use_container_width=True, hide_index=True)
 
 
-# ---------- TAB CONFIGURACIÓN ----------
+# ---------- TAB CONFIG ----------
 with tab_config:
-    st.subheader("⚙️ Configuración de saldos iniciales")
+    st.subheader("⚙️ Configuración saldos iniciales")
 
     saldos_init = get_saldos_iniciales()
     df_conf = pd.DataFrame({
@@ -974,14 +759,12 @@ with tab_config:
         "saldo_inicial": [saldos_init.get(c, 0.0) for c in CUENTAS],
     })
 
-    st.caption("Edita saldos y pulsa **Guardar saldos**. (No se guardan al vuelo para evitar sobresaltos).")
-
     df_conf_edit = st.data_editor(
         df_conf,
         hide_index=True,
         num_rows="fixed",
         use_container_width=True,
-        key="editor_saldos_iniciales",
+        key="editor_saldos",
         column_config={
             "cuenta": st.column_config.TextColumn("Cuenta", disabled=True),
             "saldo_inicial": st.column_config.NumberColumn("Saldo inicial", format="%.2f"),
@@ -990,8 +773,6 @@ with tab_config:
 
     if st.button("💾 Guardar saldos", key="save_saldos"):
         for _, row in df_conf_edit.iterrows():
-            cuenta = row["cuenta"]
-            saldo = row["saldo_inicial"] or 0.0
-            update_saldo_inicial_upsert(cuenta, saldo)
-        st.success("Saldos iniciales actualizados ✅")
+            update_saldo_inicial_upsert(row["cuenta"], row["saldo_inicial"] or 0.0)
+        st.success("Saldos guardados ✅")
         st.rerun()
