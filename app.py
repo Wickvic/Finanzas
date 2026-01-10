@@ -541,8 +541,8 @@ def filtros_anio_mes_texto(prefix, modo_movil_local):
 
 
 # (5) cambios sin guardar: helper banner
-def unsaved_banner(tab_key: str, df_edit: pd.DataFrame, cols: List[str]):
-    fp = df_fingerprint(df_edit, cols)
+def unsaved_banner(tab_key: str, df_edit: pd.DataFrame, cols_fingerprint: List[str]):
+    fp = df_fingerprint(df_edit, cols_fingerprint)
     saved_fp_key = f"{tab_key}_saved_fp"
     current_fp_key = f"{tab_key}_current_fp"
     st.session_state[current_fp_key] = fp
@@ -551,12 +551,11 @@ def unsaved_banner(tab_key: str, df_edit: pd.DataFrame, cols: List[str]):
     if saved_fp and saved_fp != fp:
         st.warning("⚠️ Tienes cambios sin guardar en esta pestaña.")
     elif not saved_fp:
-        # primera vez: tomamos como “guardado” el estado inicial
         st.session_state[saved_fp_key] = fp
 
 
-def mark_saved(tab_key: str, df_edit: pd.DataFrame, cols: List[str]):
-    st.session_state[f"{tab_key}_saved_fp"] = df_fingerprint(df_edit, cols)
+def mark_saved(tab_key: str, df_edit: pd.DataFrame, cols_fingerprint: List[str]):
+    st.session_state[f"{tab_key}_saved_fp"] = df_fingerprint(df_edit, cols_fingerprint)
 
 
 # (8) UI: duplicar última fila útil
