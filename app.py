@@ -661,10 +661,13 @@ with tab_gastos:
     df_g_visible["🗑 Eliminar"] = False
     df_g_visible = aplicar_defaults_df_editor(df_g_visible, default_cuenta=default_cuenta)
 
-    ctop1, ctop2 = st.columns([1, 3])
+    ctop1, _ = st.columns([1, 3])
     with ctop1:
         if st.button("➕ Duplicar última fila", key="dup_g"):
-            df_g_visible = add_duplicate_last_row(df_g_visible, cols_to_dup=["fecha", "descripcion", "categoria", "cuenta", "importe"])
+            df_g_visible = add_duplicate_last_row(
+                df_g_visible,
+                cols_to_dup=["fecha", "descripcion", "categoria", "cuenta", "importe"]
+            )
 
     df_g_edit = st.data_editor(
         df_g_visible,
@@ -675,6 +678,7 @@ with tab_gastos:
         column_config={
             "id": st.column_config.TextColumn("", disabled=True, width="small"),
             "fecha": st.column_config.DateColumn("Fecha", format=DATE_FORMAT),
+            "descripcion": st.column_config.TextColumn("Descripción"),
             "categoria": st.column_config.SelectboxColumn("Categoría", options=CATS_GASTOS),
             "cuenta": st.column_config.SelectboxColumn("Cuenta", options=CUENTAS),
             "importe": st.column_config.TextColumn("Importe"),
@@ -682,26 +686,21 @@ with tab_gastos:
         },
     )
 
-    unsaved_banner("gastos", df_g_edit, cols_fingerprint=["id", "fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"])
+    unsaved_banner(
+        "gastos",
+        df_g_edit,
+        cols_fingerprint=["id", "fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"],
+    )
+
     st.metric("Total gastos (vista actual)", f"{total_importe_col(df_g_edit):,.2f} €")
 
-        if st.button("💾 Guardar cambios", key="save_gastos_real", disabled=st.session_state["saving"]):
+    if st.button("💾 Guardar cambios", key="save_gastos", disabled=st.session_state["saving"]):
         guardar_cambios_robusto(
             "gastos",
             df_g_edit,
             modo="gastos",
-            cols_fingerprint=[
-                "id",
-                "fecha",
-                "descripcion",
-                "categoria",
-                "cuenta",
-                "importe",
-                "🗑 Eliminar",
-            ],
+            cols_fingerprint=["id", "fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"],
         )
-
-
 
 # ---------- TAB INGRESOS ----------
 with tab_ingresos:
