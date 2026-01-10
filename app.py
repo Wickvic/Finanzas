@@ -383,41 +383,33 @@ def df_to_pdf_bytes(df, title="Datos"):
 # ---------- Editor helpers (ID oculto sin columna visible) ----------
 def build_editor_df(df_src: pd.DataFrame, visible_cols: List[str], default_cuenta: str) -> pd.DataFrame:
     """
-    Devuelve un df para st.data_editor:
-    - NO muestra id
-    - usa __row_id como índice oculto
-    - filas nuevas usan __new__... para evitar índices duplicados
+    - Crea df para st.data_editor
+    - Guarda el id real en columna oculta __id
+    - Usa un índice artificial (row_0, row_1...) que no revela ids
     """
     dfv = df_src.copy()
 
-    # Asegurar columnas
     for c in ["id"] + visible_cols:
         if c not in dfv.columns:
             dfv[c] = None
 
     dfv = dfv[["id"] + visible_cols].copy()
     dfv["importe"] = dfv["importe"].apply(lambda x: "" if pd.isna(x) else str(x))
-
     dfv["🗑 Eliminar"] = False
 
-    # defaults (sobre vista con range index)
+    # defaults
     dfv = aplicar_defaults_df_editor(dfv, default_cuenta=default_cuenta)
 
-    # índice oculto estable
-    dfv["id"] = dfv["id"].fillna("").astype(str)
-    row_ids = []
-    for i, rid in enumerate(dfv["id"].tolist()):
-        if rid.strip():
-            row_ids.append(rid.strip())
-        else:
-            row_ids.append(f"__new__{i}_{uuid.uuid4().hex[:8]}")
-    dfv["__row_id"] = row_ids
-
-    # quitamos id visible
+    # id REAL oculto
+    dfv["__id"] = dfv["id"].fillna("").astype(str)
     dfv = dfv.drop(columns=["id"])
-    dfv = dfv.set_index("__row_id")
-    dfv.index.name = ""  # evita el título del índice
+
+    # índice artificial (no se mostrará, y aunque se muestre no contiene ids)
+    dfv.index = [f"row_{i}" for i in range(len(dfv))]
+    dfv.index.name = ""
+
     return dfv
+
 
 def add_duplicate_last_row(df_editor: pd.DataFrame, cols_to_dup: List[str]) -> pd.DataFrame:
     """
@@ -460,15 +452,13 @@ def validar_y_preparar_payload_desde_editor(df_edit: pd.DataFrame, modo: str) ->
     rows_insert = []
     avisos = []
 
-    # índice oculto = id real si no empieza por __new__
-    for ridx, r in df_edit.iterrows():
-        rid = str(ridx).strip() if ridx is not None else ""
-
+    for _, r in df_edit.iterrows():
+        rid = safe_str(r.get("__id", "")).strip()   # <- id real oculto
         eliminar = bool(r.get("🗑 Eliminar", False))
-        es_nueva = (not rid) or rid.startswith("__new__")
+        es_nueva = (rid == "")
 
         if eliminar:
-            if (not es_nueva) and rid:
+            if not es_nueva:
                 ids_borrar.append(rid)
             continue
 
@@ -481,6 +471,7 @@ def validar_y_preparar_payload_desde_editor(df_edit: pd.DataFrame, modo: str) ->
             continue
 
         desc = safe_str(r.get("descripcion")).strip()
+
         cuenta = sanitize_choice(r.get("cuenta"), CUENTAS)
         if not cuenta:
             avisos.append("Cuenta inválida o vacía.")
@@ -513,7 +504,7 @@ def validar_y_preparar_payload_desde_editor(df_edit: pd.DataFrame, modo: str) ->
             payload["categoria"] = "Transferencia"
             payload["cuenta_destino"] = cuenta_destino
 
-        if (not es_nueva) and rid:
+        if not es_nueva:
             payload_up = dict(payload)
             payload_up["id"] = rid
             rows_upsert.append(payload_up)
@@ -521,6 +512,7 @@ def validar_y_preparar_payload_desde_editor(df_edit: pd.DataFrame, modo: str) ->
             rows_insert.append(payload)
 
     return ids_borrar, rows_upsert, rows_insert, avisos
+
 
 def total_importe_col(df_edit, col="importe"):
     return sum(float(parse_importe(x) or 0) for x in df_edit[col].tolist())
@@ -553,39 +545,6 @@ def invalidate_data():
 
 # ---------- APP ----------
 st.set_page_config(page_title="Finanzas Familiares", layout="wide")
-
-st.markdown(
-    """
-    <style>
-    /* --- Minimizar al máximo la columna izquierda (row header) en data_editor/dataframe --- */
-    div[data-testid="stDataFrame"] div[role="rowheader"],
-    div[data-testid="stDataEditor"] div[role="rowheader"]{
-        width: 22px !important;
-        min-width: 22px !important;
-        max-width: 22px !important;
-        padding-left: 2px !important;
-        padding-right: 2px !important;
-    }
-
-    /* Minimiza el “hueco” del header superior izquierdo */
-    div[data-testid="stDataFrame"] div[role="columnheader"]:first-child,
-    div[data-testid="stDataEditor"] div[role="columnheader"]:first-child{
-        width: 22px !important;
-        min-width: 22px !important;
-        max-width: 22px !important;
-        padding-left: 2px !important;
-        padding-right: 2px !important;
-    }
-
-    /* Si aparece numeración/íconos en el rowheader, los escondemos */
-    div[data-testid="stDataFrame"] div[role="rowheader"] * ,
-    div[data-testid="stDataEditor"] div[role="rowheader"] * {
-        opacity: 0 !important;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
 st.title("Finanzas familiares")
 
 # Sidebar
@@ -732,6 +691,7 @@ with tab_gastos:
         num_rows="dynamic",
         use_container_width=True,
         key="editor_gastos",
+        column_order=["fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"],
         column_config={
             "fecha": st.column_config.DateColumn("Fecha", format=DATE_FORMAT),
             "descripcion": st.column_config.TextColumn("Descripción"),
@@ -786,6 +746,7 @@ with tab_ingresos:
         num_rows="dynamic",
         use_container_width=True,
         key="editor_ingresos",
+        column_order=["fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"],
         column_config={
             "fecha": st.column_config.DateColumn("Fecha", format=DATE_FORMAT),
             "descripcion": st.column_config.TextColumn("Descripción"),
@@ -838,6 +799,7 @@ with tab_transf:
         num_rows="dynamic",
         use_container_width=True,
         key="editor_transf",
+        column_order=["fecha", "descripcion", "cuenta", "cuenta_destino", "importe", "🗑 Eliminar"],
         column_config={
             "fecha": st.column_config.DateColumn("Fecha", format=DATE_FORMAT),
             "descripcion": st.column_config.TextColumn("Descripción"),
