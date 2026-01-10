@@ -275,17 +275,15 @@ def calcular_saldos_por_cuenta(df):
 
 # ---------- GUARDADO ROBUSTO (usa el id del editor, no índices) ----------
 def validar_y_preparar_payload_desde_editor(df_edit, modo):
-    """
-    df_edit contiene 'id' (deshabilitado) + campos visibles + 🗑 Eliminar
-    """
     ids_borrar = []
     rows_upsert = []
+
+    REQUIRED_KEYS = ["id", "fecha", "descripcion", "categoria", "cuenta", "cuenta_destino", "importe"]
 
     for _, r in df_edit.iterrows():
         rid = r.get("id", None)
         eliminar = bool(r.get("🗑 Eliminar", False))
 
-        # borrar SOLO si lo marca el usuario y hay id
         if eliminar:
             if pd.notna(rid) and str(rid).strip() != "":
                 ids_borrar.append(rid)
@@ -301,16 +299,17 @@ def validar_y_preparar_payload_desde_editor(df_edit, modo):
 
         desc = (r.get("descripcion") or "").strip()
         cuenta = (r.get("cuenta") or "").strip()
-
         if not cuenta:
             continue
 
-        payload = {
-            "fecha": normalizar_fecha(fecha),
-            "descripcion": desc,
-            "cuenta": cuenta,
-            "importe": float(imp),
-        }
+        # --- construir SIEMPRE las mismas keys ---
+        payload = {k: None for k in REQUIRED_KEYS}
+
+        payload["id"] = rid if (pd.notna(rid) and str(rid).strip() != "") else None
+        payload["fecha"] = normalizar_fecha(fecha)
+        payload["descripcion"] = desc
+        payload["cuenta"] = cuenta
+        payload["importe"] = float(imp)
 
         if modo in ("gastos", "ingresos"):
             categoria = (r.get("categoria") or "").strip()
@@ -319,16 +318,12 @@ def validar_y_preparar_payload_desde_editor(df_edit, modo):
             payload["categoria"] = categoria
             payload["cuenta_destino"] = None
 
-        if modo == "transferencias":
+        elif modo == "transferencias":
             cuenta_destino = (r.get("cuenta_destino") or "").strip()
             if not cuenta_destino:
                 continue
             payload["categoria"] = "Transferencia"
             payload["cuenta_destino"] = cuenta_destino
-
-        # si hay id, será UPDATE por upsert; si no, insert
-        if pd.notna(rid) and str(rid).strip() != "":
-            payload["id"] = rid
 
         rows_upsert.append(payload)
 
