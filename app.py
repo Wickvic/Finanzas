@@ -553,6 +553,39 @@ def invalidate_data():
 
 # ---------- APP ----------
 st.set_page_config(page_title="Finanzas Familiares", layout="wide")
+
+st.markdown(
+    """
+    <style>
+    /* --- Minimizar al máximo la columna izquierda (row header) en data_editor/dataframe --- */
+    div[data-testid="stDataFrame"] div[role="rowheader"],
+    div[data-testid="stDataEditor"] div[role="rowheader"]{
+        width: 22px !important;
+        min-width: 22px !important;
+        max-width: 22px !important;
+        padding-left: 2px !important;
+        padding-right: 2px !important;
+    }
+
+    /* Minimiza el “hueco” del header superior izquierdo */
+    div[data-testid="stDataFrame"] div[role="columnheader"]:first-child,
+    div[data-testid="stDataEditor"] div[role="columnheader"]:first-child{
+        width: 22px !important;
+        min-width: 22px !important;
+        max-width: 22px !important;
+        padding-left: 2px !important;
+        padding-right: 2px !important;
+    }
+
+    /* Si aparece numeración/íconos en el rowheader, los escondemos */
+    div[data-testid="stDataFrame"] div[role="rowheader"] * ,
+    div[data-testid="stDataEditor"] div[role="rowheader"] * {
+        opacity: 0 !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 st.title("Finanzas familiares")
 
 # Sidebar
