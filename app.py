@@ -561,28 +561,19 @@ st.title("Finanzas familiares")
 # CSS: oculta/minimiza índice + columna id
 st.markdown("""
 <style>
-/* Minimiza el índice (streamlitApp/row_0) si Streamlit insiste */
-div[data-testid="stDataEditor"] div[role="rowheader"]{
-  width: 12px !important;
-  min-width: 12px !important;
-  max-width: 12px !important;
-  padding: 0 !important;
-}
-div[data-testid="stDataEditor"] div[role="rowheader"] *{
-  opacity: 0 !important;
-}
-
-/* Oculta columna id */
+/* Columna id ultra-mini (cabecera + celdas) */
 div[data-testid="stDataEditor"] [data-column="id"],
 div[data-testid="stDataEditor"] [data-testid="stDataEditorColumnHeader"][data-column="id"]{
-  width: 1px !important;
-  min-width: 1px !important;
-  max-width: 1px !important;
+  width: 0px !important;
+  min-width: 0px !important;
+  max-width: 0px !important;
   padding: 0 !important;
+  margin: 0 !important;
   opacity: 0 !important;
-  overflow: hidden !important;
+  border: 0 !important;
 }
 </style>
+
 """, unsafe_allow_html=True)
 
 # Sidebar
@@ -728,6 +719,7 @@ with tab_gastos:
         num_rows="dynamic",
         use_container_width=True,
         key="editor_gastos",
+        column_order=["fecha","descripcion","categoria","cuenta","importe","🗑 Eliminar","id"],
         column_config={
             "id": st.column_config.TextColumn("", disabled=True, width="small"),
             "fecha": st.column_config.DateColumn("Fecha", format=DATE_FORMAT),
@@ -784,6 +776,7 @@ with tab_ingresos:
         num_rows="dynamic",
         use_container_width=True,
         key="editor_ingresos",
+        column_order=["fecha","descripcion","categoria","cuenta","importe","🗑 Eliminar","id"],
         column_config={
             "id": st.column_config.TextColumn("", disabled=True, width="small"),
             "fecha": st.column_config.DateColumn("Fecha", format=DATE_FORMAT),
@@ -838,6 +831,7 @@ with tab_transf:
         num_rows="dynamic",
         use_container_width=True,
         key="editor_transf",
+        column_order=["fecha","descripcion","cuenta","cuenta_destino","importe","🗑 Eliminar","id"],
         column_config={
             "id": st.column_config.TextColumn("", disabled=True, width="small"),
             "fecha": st.column_config.DateColumn("Fecha", format=DATE_FORMAT),
