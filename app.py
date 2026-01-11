@@ -99,7 +99,7 @@ DATE_FORMAT = "DD/MM/YYYY"
 def nombre_mes(m):
     return MESES_NOMBRES.get(m, str(m))
 
-# ---------- UTIL: coma/punto + normalización ----------
+# ---------- UTIL ----------
 def parse_importe(v):
     if v is None:
         return None
@@ -143,6 +143,18 @@ def short_json(obj, max_chars=2000):
         return s[:max_chars] + "\n... (truncado)"
     return s
 
+def normalize_hidden_id(x) -> str:
+    """
+    Convierte None / 'None' / 'nan' / '' a ''.
+    Esto es CRÍTICO para detectar filas nuevas (INSERT) correctamente.
+    """
+    if x is None:
+        return ""
+    s = str(x).strip()
+    if s.lower() in ("", "none", "nan", "nat"):
+        return ""
+    return s
+
 # ---------- Debug / error helper ----------
 def show_http_error(action: str, r: requests.Response, sample_payload=None):
     st.error(f"{action} ERROR: {r.status_code}")
@@ -154,7 +166,7 @@ def show_http_error(action: str, r: requests.Response, sample_payload=None):
         st.caption("Payload (muestra):")
         st.code(short_json(sample_payload, 2500))
 
-# ---------- SUPABASE (sin llamadas en cada edición) ----------
+# ---------- SUPABASE I/O ----------
 def supa_get(table: str, params: dict):
     url = f"{BASE_URL}/{table}"
     r = SESSION.get(url, headers=HEADERS, params=params, timeout=TIMEOUT)
@@ -298,9 +310,8 @@ def aplicar_defaults_df_editor(df_visible, default_cuenta="Principal"):
     df2 = df_visible.copy()
     if "cuenta" not in df2.columns:
         return df2
-
     for i in range(len(df2)):
-        cuenta = df2.at[i, "cuenta"] if "cuenta" in df2.columns else ""
+        cuenta = df2.at[i, "cuenta"]
         cuenta_vacia = (cuenta is None) or (str(cuenta).strip() == "")
         if cuenta_vacia:
             df2.at[i, "cuenta"] = default_cuenta
@@ -348,7 +359,7 @@ def df_to_pdf_bytes(df, title="Datos"):
         return None
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
-    width, height = A4
+    _, height = A4
     y = height - 40
     c.setFont("Helvetica-Bold", 12)
     c.drawString(40, y, title)
@@ -380,55 +391,44 @@ def df_to_pdf_bytes(df, title="Datos"):
     buffer.seek(0)
     return buffer
 
-# ---------- Editor helpers (ID oculto sin columna visible) ----------
+# ---------- Editor helpers (ID oculto y estable) ----------
 def build_editor_df(df_src: pd.DataFrame, visible_cols: List[str], default_cuenta: str) -> pd.DataFrame:
     """
-    Devuelve un df para st.data_editor:
-    - NO muestra id
-    - usa __row_id como índice oculto
-    - filas nuevas usan __new__... para evitar índices duplicados
+    Devuelve df para st.data_editor:
+    - __id = id real (oculto por CSS pero presente para guardar)
+    - índice artificial row_0, row_1... (aunque se vea, no filtra UUIDs)
     """
     dfv = df_src.copy()
 
-    # Asegurar columnas
     for c in ["id"] + visible_cols:
         if c not in dfv.columns:
             dfv[c] = None
 
     dfv = dfv[["id"] + visible_cols].copy()
-    dfv["importe"] = dfv["importe"].apply(lambda x: "" if pd.isna(x) else str(x))
+
+    if "importe" in dfv.columns:
+        dfv["importe"] = dfv["importe"].apply(lambda x: "" if pd.isna(x) else str(x))
 
     dfv["🗑 Eliminar"] = False
 
-    # defaults (sobre vista con range index)
-    dfv = aplicar_defaults_df_editor(dfv, default_cuenta=default_cuenta)
+    if "cuenta" in dfv.columns:
+        dfv = aplicar_defaults_df_editor(dfv, default_cuenta=default_cuenta)
 
-    # índice oculto estable
-    dfv["id"] = dfv["id"].fillna("").astype(str)
-    row_ids = []
-    for i, rid in enumerate(dfv["id"].tolist()):
-        if rid.strip():
-            row_ids.append(rid.strip())
-        else:
-            row_ids.append(f"__new__{i}_{uuid.uuid4().hex[:8]}")
-    dfv["__row_id"] = row_ids
-
-    # quitamos id visible
+    dfv["__id"] = dfv["id"].apply(normalize_hidden_id)
     dfv = dfv.drop(columns=["id"])
-    dfv = dfv.set_index("__row_id")
-    dfv.index.name = ""  # evita el título del índice
+
+    dfv.index = [f"row_{i}" for i in range(len(dfv))]
+    dfv.index.name = ""
     return dfv
 
 def add_duplicate_last_row(df_editor: pd.DataFrame, cols_to_dup: List[str]) -> pd.DataFrame:
     """
-    Duplica la última fila útil en un df_editor (con índice oculto).
+    Duplica la última fila útil manteniendo __id vacío (para INSERT).
     """
-    df2 = df_editor.copy()
-    if df2.empty:
-        return df2
+    if df_editor.empty:
+        return df_editor
 
-    # trabajamos sobre reset para copiar valores
-    tmp = df2.reset_index(drop=True)
+    tmp = df_editor.reset_index(drop=True).copy()
 
     last_row = None
     for i in range(len(tmp) - 1, -1, -1):
@@ -440,35 +440,37 @@ def add_duplicate_last_row(df_editor: pd.DataFrame, cols_to_dup: List[str]) -> p
         last_row = tmp.iloc[-1]
 
     new = {c: last_row.get(c, "") for c in tmp.columns}
+
+    # Fila nueva => __id vacío para INSERT
+    if "__id" in new:
+        new["__id"] = ""
     if "🗑 Eliminar" in new:
         new["🗑 Eliminar"] = False
 
     tmp = pd.concat([tmp, pd.DataFrame([new])], ignore_index=True)
 
-    # reconstruimos índice oculto (manteniendo los existentes)
-    row_ids = []
-    for i in range(len(tmp)):
-        row_ids.append(f"__new__dup{i}_{uuid.uuid4().hex[:8]}")
-    tmp.index = row_ids
+    tmp.index = [f"row_{i}" for i in range(len(tmp))]
     tmp.index.name = ""
     return tmp
 
-# ---------- PREPARAR PAYLOAD (split upsert/insert) ----------
+# ---------- PREPARAR PAYLOAD ----------
 def validar_y_preparar_payload_desde_editor(df_edit: pd.DataFrame, modo: str) -> Tuple[List[str], List[dict], List[dict], List[str]]:
+    df_edit = df_edit.copy()
+    if "__id" in df_edit.columns:
+        df_edit["__id"] = df_edit["__id"].apply(normalize_hidden_id)
+
     ids_borrar = []
     rows_upsert = []
     rows_insert = []
     avisos = []
 
-    # índice oculto = id real si no empieza por __new__
-    for ridx, r in df_edit.iterrows():
-        rid = str(ridx).strip() if ridx is not None else ""
+    for _, r in df_edit.iterrows():
+        rid = normalize_hidden_id(r.get("__id", ""))
+        es_nueva = (rid == "")
 
         eliminar = bool(r.get("🗑 Eliminar", False))
-        es_nueva = (not rid) or rid.startswith("__new__")
-
         if eliminar:
-            if (not es_nueva) and rid:
+            if not es_nueva:
                 ids_borrar.append(rid)
             continue
 
@@ -481,6 +483,7 @@ def validar_y_preparar_payload_desde_editor(df_edit: pd.DataFrame, modo: str) ->
             continue
 
         desc = safe_str(r.get("descripcion")).strip()
+
         cuenta = sanitize_choice(r.get("cuenta"), CUENTAS)
         if not cuenta:
             avisos.append("Cuenta inválida o vacía.")
@@ -513,7 +516,7 @@ def validar_y_preparar_payload_desde_editor(df_edit: pd.DataFrame, modo: str) ->
             payload["categoria"] = "Transferencia"
             payload["cuenta_destino"] = cuenta_destino
 
-        if (not es_nueva) and rid:
+        if not es_nueva:
             payload_up = dict(payload)
             payload_up["id"] = rid
             rows_upsert.append(payload_up)
@@ -527,10 +530,6 @@ def total_importe_col(df_edit, col="importe"):
 
 # ---------- CARGA EN MEMORIA (anti parpadeo) ----------
 def load_data_once():
-    """
-    Carga datos una vez por sesión.
-    Para refrescar: invalidate_data() + st.rerun()
-    """
     if "data_loaded" not in st.session_state:
         st.session_state["data_loaded"] = False
 
@@ -546,14 +545,44 @@ def load_data_once():
 
 def invalidate_data():
     st.session_state["data_loaded"] = False
-    st.session_state.pop("rows_mov", None)
-    st.session_state.pop("rows_saldos", None)
-    st.session_state.pop("df_base", None)
-    st.session_state.pop("saldos_init", None)
+    for k in ["rows_mov", "rows_saldos", "df_base", "saldos_init"]:
+        st.session_state.pop(k, None)
 
 # ---------- APP ----------
 st.set_page_config(page_title="Finanzas Familiares", layout="wide")
 st.title("Finanzas familiares")
+
+# CSS: ocultar __id + minimizar gutter izquierdo
+st.markdown(
+    """
+    <style>
+    /* Minimizar al máximo el "gutter" izquierdo (cabecera de filas) */
+    div[data-testid="stDataEditor"] div[role="rowheader"],
+    div[data-testid="stDataFrame"] div[role="rowheader"]{
+        width: 20px !important;
+        min-width: 20px !important;
+        max-width: 20px !important;
+        padding: 0 !important;
+    }
+    div[data-testid="stDataEditor"] div[role="rowheader"] *,
+    div[data-testid="stDataFrame"] div[role="rowheader"] *{
+        opacity: 0 !important;
+    }
+
+    /* Ocultar la columna __id (celdas y header) */
+    div[data-testid="stDataEditor"] [data-column="__id"],
+    div[data-testid="stDataEditor"] [data-testid="stDataEditorColumnHeader"][data-column="__id"]{
+        width: 1px !important;
+        min-width: 1px !important;
+        max-width: 1px !important;
+        padding: 0 !important;
+        opacity: 0 !important;
+        overflow: hidden !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
 # Sidebar
 default_cuenta = st.sidebar.selectbox("Cuenta por defecto (filas nuevas)", CUENTAS, index=0)
@@ -561,16 +590,13 @@ generar_uuid_inserts = st.sidebar.checkbox("Generar UUID en filas nuevas (recome
 modo_movil = st.sidebar.checkbox("📱 Modo móvil compacto", value=False)
 modo_debug = st.sidebar.checkbox("🧪 Debug", value=False)
 
-# Lock anti doble guardado
 if "saving" not in st.session_state:
     st.session_state["saving"] = False
 
-# Botón opcional de refresco manual (por si quieres)
 if st.sidebar.button("🔄 Refrescar datos"):
     invalidate_data()
     st.rerun()
 
-# Cargar datos una sola vez (no se re-pide al editar celdas)
 try:
     load_data_once()
     df_base = st.session_state["df_base"]
@@ -634,7 +660,6 @@ def guardar_cambios_robusto(tab_key: str, df_edit: pd.DataFrame, modo: str, cols
             st.write("Upserts:", len(rows_upsert), "Inserts:", len(rows_insert))
             st.json({"upsert_sample": rows_upsert[:3], "insert_sample": rows_insert[:3]})
 
-        # Orden seguro
         res_in = insert_movimientos_bulk(rows_insert, generar_uuid=generar_uuid_inserts)
         if res_in is None:
             st.error("No se pudo guardar (falló INSERT). No se ha borrado nada.")
@@ -651,7 +676,6 @@ def guardar_cambios_robusto(tab_key: str, df_edit: pd.DataFrame, modo: str, cols
         else:
             st.success(f"Guardado ✅ (inserts: {len(res_in)} | updates: {len(res_up)} | borrados: {len(ids_borrar)})")
 
-        # Marcar como guardado + refrescar datos SOLO aquí
         mark_saved(tab_key, df_edit, cols_fingerprint)
         invalidate_data()
         st.rerun()
@@ -691,7 +715,7 @@ with tab_gastos:
     ctop1, _ = st.columns([1, 3])
     with ctop1:
         if st.button("➕ Duplicar última fila", key="dup_g"):
-            df_g_editor = add_duplicate_last_row(df_g_editor, cols_to_dup=["fecha", "descripcion", "categoria", "cuenta", "importe"])
+            df_g_editor = add_duplicate_last_row(df_g_editor, cols_to_dup=visible_cols_g)
 
     df_g_edit = st.data_editor(
         df_g_editor,
@@ -699,6 +723,7 @@ with tab_gastos:
         num_rows="dynamic",
         use_container_width=True,
         key="editor_gastos",
+        column_order=["fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar", "__id"],
         column_config={
             "fecha": st.column_config.DateColumn("Fecha", format=DATE_FORMAT),
             "descripcion": st.column_config.TextColumn("Descripción"),
@@ -706,14 +731,15 @@ with tab_gastos:
             "cuenta": st.column_config.SelectboxColumn("Cuenta", options=CUENTAS),
             "importe": st.column_config.TextColumn("Importe"),
             "🗑 Eliminar": st.column_config.CheckboxColumn("🗑"),
+            "__id": st.column_config.TextColumn("", disabled=True, width="small"),
         },
     )
 
-    unsaved_banner("gastos", df_g_edit, cols_fingerprint=["fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"])
+    unsaved_banner("gastos", df_g_edit, cols_fingerprint=["fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar", "__id"])
     st.metric("Total gastos (vista actual)", f"{total_importe_col(df_g_edit):,.2f} €")
 
     if st.button("💾 Guardar cambios", key="save_gastos", disabled=st.session_state["saving"]):
-        guardar_cambios_robusto("gastos", df_g_edit, modo="gastos", cols_fingerprint=["fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"])
+        guardar_cambios_robusto("gastos", df_g_edit, modo="gastos", cols_fingerprint=["fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar", "__id"])
 
 # ---------- TAB INGRESOS ----------
 with tab_ingresos:
@@ -745,7 +771,7 @@ with tab_ingresos:
     df_i_editor = build_editor_df(df_i, visible_cols_i, default_cuenta=default_cuenta)
 
     if st.button("➕ Duplicar última fila", key="dup_i"):
-        df_i_editor = add_duplicate_last_row(df_i_editor, cols_to_dup=["fecha", "descripcion", "categoria", "cuenta", "importe"])
+        df_i_editor = add_duplicate_last_row(df_i_editor, cols_to_dup=visible_cols_i)
 
     df_i_edit = st.data_editor(
         df_i_editor,
@@ -753,6 +779,7 @@ with tab_ingresos:
         num_rows="dynamic",
         use_container_width=True,
         key="editor_ingresos",
+        column_order=["fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar", "__id"],
         column_config={
             "fecha": st.column_config.DateColumn("Fecha", format=DATE_FORMAT),
             "descripcion": st.column_config.TextColumn("Descripción"),
@@ -760,14 +787,15 @@ with tab_ingresos:
             "cuenta": st.column_config.SelectboxColumn("Cuenta", options=CUENTAS),
             "importe": st.column_config.TextColumn("Importe"),
             "🗑 Eliminar": st.column_config.CheckboxColumn("🗑"),
+            "__id": st.column_config.TextColumn("", disabled=True, width="small"),
         },
     )
 
-    unsaved_banner("ingresos", df_i_edit, cols_fingerprint=["fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"])
+    unsaved_banner("ingresos", df_i_edit, cols_fingerprint=["fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar", "__id"])
     st.metric("Total ingresos (vista actual)", f"{total_importe_col(df_i_edit):,.2f} €")
 
     if st.button("💾 Guardar cambios", key="save_ingresos", disabled=st.session_state["saving"]):
-        guardar_cambios_robusto("ingresos", df_i_edit, modo="ingresos", cols_fingerprint=["fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"])
+        guardar_cambios_robusto("ingresos", df_i_edit, modo="ingresos", cols_fingerprint=["fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar", "__id"])
 
 # ---------- TAB TRANSFERENCIAS ----------
 with tab_transf:
@@ -797,7 +825,7 @@ with tab_transf:
     df_t_editor = build_editor_df(df_t, visible_cols_t, default_cuenta=default_cuenta)
 
     if st.button("➕ Duplicar última fila", key="dup_t"):
-        df_t_editor = add_duplicate_last_row(df_t_editor, cols_to_dup=["fecha", "descripcion", "cuenta", "cuenta_destino", "importe"])
+        df_t_editor = add_duplicate_last_row(df_t_editor, cols_to_dup=visible_cols_t)
 
     df_t_edit = st.data_editor(
         df_t_editor,
@@ -805,6 +833,7 @@ with tab_transf:
         num_rows="dynamic",
         use_container_width=True,
         key="editor_transf",
+        column_order=["fecha", "descripcion", "cuenta", "cuenta_destino", "importe", "🗑 Eliminar", "__id"],
         column_config={
             "fecha": st.column_config.DateColumn("Fecha", format=DATE_FORMAT),
             "descripcion": st.column_config.TextColumn("Descripción"),
@@ -812,13 +841,14 @@ with tab_transf:
             "cuenta_destino": st.column_config.SelectboxColumn("Cuenta destino", options=CUENTAS),
             "importe": st.column_config.TextColumn("Importe"),
             "🗑 Eliminar": st.column_config.CheckboxColumn("🗑"),
+            "__id": st.column_config.TextColumn("", disabled=True, width="small"),
         },
     )
 
-    unsaved_banner("transf", df_t_edit, cols_fingerprint=["fecha", "descripcion", "cuenta", "cuenta_destino", "importe", "🗑 Eliminar"])
+    unsaved_banner("transf", df_t_edit, cols_fingerprint=["fecha", "descripcion", "cuenta", "cuenta_destino", "importe", "🗑 Eliminar", "__id"])
 
     if st.button("💾 Guardar cambios", key="save_transf", disabled=st.session_state["saving"]):
-        guardar_cambios_robusto("transf", df_t_edit, modo="transferencias", cols_fingerprint=["fecha", "descripcion", "cuenta", "cuenta_destino", "importe", "🗑 Eliminar"])
+        guardar_cambios_robusto("transf", df_t_edit, modo="transferencias", cols_fingerprint=["fecha", "descripcion", "cuenta", "cuenta_destino", "importe", "🗑 Eliminar", "__id"])
 
 # ---------- TAB BALANCES ----------
 with tab_balances:
