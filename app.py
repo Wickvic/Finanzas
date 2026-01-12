@@ -178,7 +178,12 @@ def show_http_error(action: str, r: requests.Response, sample_payload=None):
 # ---------- SUPABASE ----------
 def fetch_movimientos():
     url = f"{BASE_URL}/{TABLE_MOV}"
-    r = SESSION.get(url, headers=HEADERS, params={"select": "*", "order": "fecha.asc"}, timeout=TIMEOUT)
+    r = SESSION.get(
+        url,
+        headers=HEADERS,
+        params={"select": "*", "order": "created_at.asc"},  # 👈 antes: fecha.asc
+        timeout=TIMEOUT
+    )
     r.raise_for_status()
     return r.json()
 
@@ -266,9 +271,12 @@ def update_saldo_inicial_upsert(cuenta, saldo):
 def preparar_dataframe_base(rows):
     df = pd.DataFrame(rows) if rows else pd.DataFrame([])
 
-    for col in ["id"] + DB_COLUMNS:
+    for col in ["id", "created_at"] + DB_COLUMNS:
         if col not in df.columns:
             df[col] = None
+
+    # created_at
+    df["created_at_dt"] = pd.to_datetime(df["created_at"], errors="coerce")
 
     df["fecha_dt"] = pd.to_datetime(df["fecha"], errors="coerce")
     df["fecha"] = df["fecha_dt"].dt.date
@@ -290,6 +298,11 @@ def preparar_dataframe_base(rows):
             return float(v) if v is not None else float("nan")
 
     df["importe"] = df["importe"].apply(_to_float)
+
+    # 👇 orden por inserción (si existe created_at)
+    if df["created_at_dt"].notna().any():
+        df = df.sort_values(["created_at_dt", "id"], ascending=[True, True])
+
     return df
 
 
