@@ -899,26 +899,33 @@ with tab_transf:
 # ---------- TAB BALANCES ----------
 with tab_balances:
     st.subheader("📊 Balances")
+
     anio_b = st.selectbox("Año", anios_disponibles, key="anio_bal")
     meses_sel = st.multiselect("Meses", options=meses_disponibles, default=meses_disponibles, format_func=nombre_mes)
 
-    df_b = df_base[(df_base["anio"] == anio_b) & (df_base["mes"].isin(meses_sel))].copy()
+    # --- Base filtrada ---
+    df_v = df_base.copy()
+    df_v = df_v[(df_v["anio"] == anio_b) & (df_v["mes"].isin(meses_sel))].copy()
 
-    df_g_b = df_b[(df_b["cuenta_destino"].isin([None, "", " "])) & (df_b["categoria"].isin(CATS_GASTOS))]
-    df_i_b = df_b[(df_b["cuenta_destino"].isin([None, "", " "])) & (df_b["categoria"].isin(CATS_INGRESOS))]
+    # Separar gastos/ingresos
+    df_gv = df_v[(df_v["cuenta_destino"].isin([None, "", " "])) & (df_v["categoria"].isin(CATS_GASTOS))].copy()
+    df_iv = df_v[(df_v["cuenta_destino"].isin([None, "", " "])) & (df_v["categoria"].isin(CATS_INGRESOS))].copy()
 
-    total_g = float(df_g_b["importe"].fillna(0).sum())
-    total_i = float(df_i_b["importe"].fillna(0).sum())
+    total_g = float(df_gv["importe"].fillna(0).sum())
+    total_i = float(df_iv["importe"].fillna(0).sum())
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Ingresos", f"{total_i:,.2f} €")
     c2.metric("Gastos", f"{total_g:,.2f} €")
     c3.metric("Ahorro", f"{(total_i - total_g):,.2f} €")
 
+    # -------------------- SALDOS POR CUENTA --------------------
+    st.markdown("---")
     st.markdown("**Saldos por cuenta (hasta fin del año)**")
     saldos = calcular_saldos_por_cuenta(df_base[df_base["anio"] <= anio_b], saldos_iniciales=saldos_init)
     df_saldos = pd.DataFrame([{"Cuenta": c, "Saldo": saldos.get(c, 0.0)} for c in CUENTAS])
     st.dataframe(df_saldos, use_container_width=True, hide_index=True)
+
 
     # -------------------- VISUAL PRO --------------------
     st.markdown("---")
@@ -1111,6 +1118,7 @@ with tab_balances:
         use_container_width=True,
         hide_index=True
     )
+
 
 
 # ---------- TAB HISTÓRICO ----------
