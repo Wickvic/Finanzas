@@ -750,7 +750,6 @@ with tab_gastos:
 
     visible_cols_g = ["fecha", "descripcion", "categoria", "cuenta", "importe"]
     df_g_editor = build_editor_df(df_g, visible_cols_g, default_cuenta=default_cuenta)
-    autosave_nuevas_filas("gastos", df_g_edit, modo="gastos")
 
     ctop1, _ = st.columns([1, 3])
     with ctop1:
@@ -774,6 +773,7 @@ with tab_gastos:
             "🗑 Eliminar": st.column_config.CheckboxColumn("🗑"),
         },
     )
+    autosave_nuevas_filas("gastos", df_g_edit, modo="gastos")
 
     unsaved_banner("gastos", df_g_edit, cols=["id", "fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"])
     st.metric("Total gastos (vista actual)", f"{sum(float(parse_importe(x) or 0) for x in df_g_edit['importe'].tolist()):,.2f} €")
@@ -810,7 +810,6 @@ with tab_ingresos:
 
     visible_cols_i = ["fecha", "descripcion", "categoria", "cuenta", "importe"]
     df_i_editor = build_editor_df(df_i, visible_cols_i, default_cuenta=default_cuenta)
-    autosave_nuevas_filas("ingresos", df_i_edit, modo="ingresos")
 
     if st.button("➕ Duplicar última fila", key="dup_i"):
         df_i_editor = add_duplicate_last_row(df_i_editor, cols_to_dup=visible_cols_i)
@@ -832,6 +831,7 @@ with tab_ingresos:
             "🗑 Eliminar": st.column_config.CheckboxColumn("🗑"),
         },
     )
+    autosave_nuevas_filas("ingresos", df_i_edit, modo="ingresos")
 
     unsaved_banner("ingresos", df_i_edit, cols=["id", "fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"])
     st.metric("Total ingresos (vista actual)", f"{sum(float(parse_importe(x) or 0) for x in df_i_edit['importe'].tolist()):,.2f} €")
@@ -866,7 +866,6 @@ with tab_transf:
 
     visible_cols_t = ["fecha", "descripcion", "cuenta", "cuenta_destino", "importe"]
     df_t_editor = build_editor_df(df_t, visible_cols_t, default_cuenta=default_cuenta)
-    autosave_nuevas_filas("transf", df_t_edit, modo="transferencias")
 
     if st.button("➕ Duplicar última fila", key="dup_t"):
         df_t_editor = add_duplicate_last_row(df_t_editor, cols_to_dup=visible_cols_t)
@@ -888,6 +887,7 @@ with tab_transf:
             "🗑 Eliminar": st.column_config.CheckboxColumn("🗑"),
         },
     )
+    autosave_nuevas_filas("transf", df_t_edit, modo="transferencias")
 
     unsaved_banner("transf", df_t_edit, cols=["id", "fecha", "descripcion", "cuenta", "cuenta_destino", "importe", "🗑 Eliminar"])
 
