@@ -645,6 +645,36 @@ def filtros_anio_mes_texto(prefix, modo_movil_local):
             texto = st.text_input("Buscar en descripción", key=f"busca_{prefix}")
         return anio, mes, texto
 
+def autosave_nuevas_filas(tab_key: str, df_edit: pd.DataFrame, modo: str):
+    """
+    Auto-guarda SOLO inserts (filas nuevas con id vacío) cuando estén completas.
+    No toca updates ni borrados. Mantiene el botón de guardar para el resto.
+    """
+    # Evita bucles / doble guardado
+    if st.session_state.get("saving") or st.session_state.get(f"autosave_lock_{tab_key}", False):
+        return
+
+    # Extrae qué se podría guardar
+    ids_borrar, rows_upsert, rows_insert, avisos = validar_y_preparar_payload_desde_editor(df_edit, modo=modo)
+
+    # Solo nos interesan INSERTS automáticos
+    if not rows_insert:
+        return
+
+    st.session_state[f"autosave_lock_{tab_key}"] = True
+    try:
+        res_in = insert_movimientos_bulk(rows_insert, generar_uuid=generar_uuid_inserts)
+        if res_in is None:
+            # Si falla, no hacemos rerun (para no borrar lo que el usuario estaba escribiendo)
+            st.warning("Auto-guardado: no se pudo insertar la nueva fila.")
+            return
+
+        st.toast(f"✅ Auto-guardado ({len(res_in)} fila/s nueva/s)", icon="💾")
+        invalidate_data()
+        st.rerun()
+    finally:
+        st.session_state[f"autosave_lock_{tab_key}"] = False
+
 
 # ---------- GUARDADO ROBUSTO ----------
 def guardar_cambios_robusto(tab_key: str, df_edit: pd.DataFrame, modo: str, cols_fingerprint: List[str]):
@@ -720,6 +750,7 @@ with tab_gastos:
 
     visible_cols_g = ["fecha", "descripcion", "categoria", "cuenta", "importe"]
     df_g_editor = build_editor_df(df_g, visible_cols_g, default_cuenta=default_cuenta)
+    autosave_nuevas_filas("gastos", df_g_edit, modo="gastos")
 
     ctop1, _ = st.columns([1, 3])
     with ctop1:
@@ -779,6 +810,7 @@ with tab_ingresos:
 
     visible_cols_i = ["fecha", "descripcion", "categoria", "cuenta", "importe"]
     df_i_editor = build_editor_df(df_i, visible_cols_i, default_cuenta=default_cuenta)
+    autosave_nuevas_filas("ingresos", df_i_edit, modo="ingresos")
 
     if st.button("➕ Duplicar última fila", key="dup_i"):
         df_i_editor = add_duplicate_last_row(df_i_editor, cols_to_dup=visible_cols_i)
@@ -834,6 +866,7 @@ with tab_transf:
 
     visible_cols_t = ["fecha", "descripcion", "cuenta", "cuenta_destino", "importe"]
     df_t_editor = build_editor_df(df_t, visible_cols_t, default_cuenta=default_cuenta)
+    autosave_nuevas_filas("transf", df_t_edit, modo="transferencias")
 
     if st.button("➕ Duplicar última fila", key="dup_t"):
         df_t_editor = add_duplicate_last_row(df_t_editor, cols_to_dup=visible_cols_t)
