@@ -920,131 +920,197 @@ with tab_balances:
     df_saldos = pd.DataFrame([{"Cuenta": c, "Saldo": saldos.get(c, 0.0)} for c in CUENTAS])
     st.dataframe(df_saldos, use_container_width=True, hide_index=True)
 
+    # -------------------- VISUAL PRO --------------------
     st.markdown("---")
     st.subheader("📈 Análisis visual (pro)")
-    
-    df_v = df_base.copy()
-    df_v = df_v[(df_v["anio"] == anio_b) & (df_v["mes"].isin(meses_sel))].copy()
-    
-    # Normaliza fecha para gráficas (primer día de mes)
-    df_v["mes_fecha"] = pd.to_datetime(
-        df_v["anio"].astype(int).astype(str) + "-" + df_v["mes"].astype(int).astype(str) + "-01",
-        errors="coerce"
-    )
-    
-    # Separar gastos e ingresos
-    df_gv = df_v[(df_v["cuenta_destino"].isin([None, "", " "])) & (df_v["categoria"].isin(CATS_GASTOS))].copy()
-    df_iv = df_v[(df_v["cuenta_destino"].isin([None, "", " "])) & (df_v["categoria"].isin(CATS_INGRESOS))].copy()
-    
-    c1, c2 = st.columns([1, 1])
-    
-    # -------- 1) Línea: ingresos vs gastos vs ahorro --------
-    with c1:
-        st.markdown("**Evolución mensual**")
-    
-        g_mes = df_gv.groupby("mes_fecha")["importe"].sum()
-        i_mes = df_iv.groupby("mes_fecha")["importe"].sum()
-    
-        idx = sorted(set(df_v["mes_fecha"].dropna().unique()))
-        serie = pd.DataFrame({
-            "mes": idx,
-            "Ingresos": [float(i_mes.get(m, 0.0)) for m in idx],
-            "Gastos":   [float(g_mes.get(m, 0.0)) for m in idx],
-        })
-        serie["Ahorro"] = serie["Ingresos"] - serie["Gastos"]
-    
-        serie_long = serie.melt("mes", var_name="tipo", value_name="eur")
-    
-        chart_line = (
-            alt.Chart(serie_long)
-            .mark_line(point=True)
-            .encode(
-                x=alt.X("mes:T", title="Mes"),
-                y=alt.Y("eur:Q", title="€"),
-                color=alt.Color("tipo:N", title=""),
-                tooltip=[
-                    alt.Tooltip("mes:T", title="Mes"),
-                    alt.Tooltip("tipo:N", title="Tipo"),
-                    alt.Tooltip("eur:Q", title="€", format=",.2f"),
-                ],
+
+    # Mes label bonito
+    orden_meses = meses_disponibles[:]  # [1..12]
+
+    def _mes_label(m):
+        try:
+            return nombre_mes(int(m))[:3]
+        except Exception:
+            return str(m)
+
+    df_v["mes_num"] = pd.to_numeric(df_v["mes"], errors="coerce")
+    df_v["mes_label"] = df_v["mes_num"].apply(_mes_label)
+
+    df_gv["mes_num"] = pd.to_numeric(df_gv["mes"], errors="coerce")
+    df_gv["mes_label"] = df_gv["mes_num"].apply(_mes_label)
+
+    df_iv["mes_num"] = pd.to_numeric(df_iv["mes"], errors="coerce")
+    df_iv["mes_label"] = df_iv["mes_num"].apply(_mes_label)
+
+    meses_en_vista = sorted([int(m) for m in df_v["mes_num"].dropna().unique().tolist()])
+
+    cc1, cc2 = st.columns(2)
+
+    # ---------- 1) Ingresos vs Gastos vs Ahorro ----------
+    with cc1:
+        st.markdown("**Ingresos vs Gastos vs Ahorro**")
+
+        g_mes = df_gv.groupby(["mes_num", "mes_label"])["importe"].sum().reset_index()
+        i_mes = df_iv.groupby(["mes_num", "mes_label"])["importe"].sum().reset_index()
+
+        base = pd.DataFrame({"mes_num": meses_en_vista})
+        base["mes_label"] = base["mes_num"].apply(_mes_label)
+
+        base = base.merge(i_mes[["mes_num", "importe"]].rename(columns={"importe": "Ingresos"}), on="mes_num", how="left")
+        base = base.merge(g_mes[["mes_num", "importe"]].rename(columns={"importe": "Gastos"}), on="mes_num", how="left")
+
+        base["Ingresos"] = base["Ingresos"].fillna(0.0)
+        base["Gastos"] = base["Gastos"].fillna(0.0)
+        base["Ahorro"] = base["Ingresos"] - base["Gastos"]
+
+        long = base.melt(["mes_num", "mes_label"], var_name="tipo", value_name="eur")
+
+        if len(meses_en_vista) <= 1:
+            chart = (
+                alt.Chart(long)
+                .mark_bar()
+                .encode(
+                    x=alt.X("tipo:N", title=""),
+                    y=alt.Y("eur:Q", title="€"),
+                    tooltip=[alt.Tooltip("tipo:N", title="Tipo"), alt.Tooltip("eur:Q", title="€", format=",.2f")],
+                )
+                .properties(height=320)
             )
-            .interactive()
-        )
-    
-        st.altair_chart(chart_line, use_container_width=True)
-    
-    # -------- 2) Área apilada: gastos por categoría --------
-    with c2:
-        st.markdown("**Gastos por categoría (apilado)**")
-    
+        else:
+            chart = (
+                alt.Chart(long)
+                .mark_line(point=True)
+                .encode(
+                    x=alt.X(
+                        "mes_label:O",
+                        title="Mes",
+                        sort=[_mes_label(m) for m in orden_meses if m in meses_en_vista],
+                        axis=alt.Axis(labelAngle=0),
+                    ),
+                    y=alt.Y("eur:Q", title="€"),
+                    color=alt.Color("tipo:N", title=""),
+                    tooltip=[
+                        alt.Tooltip("mes_label:O", title="Mes"),
+                        alt.Tooltip("tipo:N", title="Tipo"),
+                        alt.Tooltip("eur:Q", title="€", format=",.2f"),
+                    ],
+                )
+                .properties(height=320)
+                .interactive()
+            )
+
+        st.altair_chart(chart, use_container_width=True)
+
+    # ---------- 2) Gastos por categoría (1 mes -> barras; varios -> apilado) ----------
+    with cc2:
+        st.markdown("**Gastos por categoría**")
+
         if df_gv.empty:
             st.info("Sin gastos en el rango.")
         else:
-            g_cat_mes = (
-                df_gv.groupby(["mes_fecha", "categoria"])["importe"]
-                .sum()
-                .reset_index()
-            )
-    
-            # Para que no sea un arcoíris infinito: top 8 categorías y el resto "Otros"
             top_cats = (
                 df_gv.groupby("categoria")["importe"].sum()
                 .sort_values(ascending=False).head(8).index.tolist()
             )
-            g_cat_mes["categoria2"] = g_cat_mes["categoria"].where(g_cat_mes["categoria"].isin(top_cats), "Otros")
-    
-            g_cat_mes2 = (
-                g_cat_mes.groupby(["mes_fecha", "categoria2"])["importe"]
+
+            g_cat = df_gv.copy()
+            g_cat["cat2"] = g_cat["categoria"].where(g_cat["categoria"].isin(top_cats), "Otros")
+
+            g_cat_mes = (
+                g_cat.groupby(["mes_num", "mes_label", "cat2"])["importe"]
                 .sum().reset_index()
             )
-    
-            chart_area = (
-                alt.Chart(g_cat_mes2)
-                .mark_area()
-                .encode(
-                    x=alt.X("mes_fecha:T", title="Mes"),
-                    y=alt.Y("importe:Q", title="€", stack="zero"),
-                    color=alt.Color("categoria2:N", title="Categoría"),
-                    tooltip=[
-                        alt.Tooltip("mes_fecha:T", title="Mes"),
-                        alt.Tooltip("categoria2:N", title="Categoría"),
-                        alt.Tooltip("importe:Q", title="€", format=",.2f"),
-                    ],
+
+            if len(meses_en_vista) <= 1:
+                tot = (
+                    g_cat_mes.groupby("cat2")["importe"].sum()
+                    .sort_values(ascending=False).reset_index()
                 )
-                .interactive()
-            )
-    
-            st.altair_chart(chart_area, use_container_width=True)
+                chart2 = (
+                    alt.Chart(tot)
+                    .mark_bar()
+                    .encode(
+                        y=alt.Y("cat2:N", sort="-x", title=""),
+                        x=alt.X("importe:Q", title="€"),
+                        tooltip=[
+                            alt.Tooltip("cat2:N", title="Categoría"),
+                            alt.Tooltip("importe:Q", title="€", format=",.2f"),
+                        ],
+                    )
+                    .properties(height=320)
+                )
+            else:
+                chart2 = (
+                    alt.Chart(g_cat_mes)
+                    .mark_bar()
+                    .encode(
+                        x=alt.X(
+                            "mes_label:O",
+                            title="Mes",
+                            sort=[_mes_label(m) for m in orden_meses if m in meses_en_vista],
+                            axis=alt.Axis(labelAngle=0),
+                        ),
+                        y=alt.Y("importe:Q", title="€", stack="zero"),
+                        color=alt.Color("cat2:N", title="Categoría"),
+                        tooltip=[
+                            alt.Tooltip("mes_label:O", title="Mes"),
+                            alt.Tooltip("cat2:N", title="Categoría"),
+                            alt.Tooltip("importe:Q", title="€", format=",.2f"),
+                        ],
+                    )
+                    .properties(height=320)
+                    .interactive()
+                )
 
-        st.markdown("---")
-        
-        # -------- 3) Top gastos + filtros rápidos --------
-        st.markdown("**Top gastos (con filtros)**")
-        
-        f1, f2, f3 = st.columns([1, 1, 2])
-        with f1:
-            cuenta_f = st.selectbox("Cuenta", ["Todas"] + CUENTAS, key="bal_cuenta_f")
-        with f2:
-            cat_f = st.selectbox("Categoría", ["Todas"] + CATS_GASTOS, key="bal_cat_f")
-        with f3:
-            buscar = st.text_input("Buscar (descripción)", key="bal_buscar", placeholder="ej: supermercado, gasolina...")
-        
-        df_top = df_gv.copy()
-        if cuenta_f != "Todas":
-            df_top = df_top[df_top["cuenta"] == cuenta_f]
-        if cat_f != "Todas":
-            df_top = df_top[df_top["categoria"] == cat_f]
-        if buscar:
-            df_top = df_top[df_top["descripcion"].str.contains(buscar, case=False, na=False)]
-        
-        df_top = df_top.sort_values("importe", ascending=False).head(25)
-        
-        st.dataframe(
-            df_top[["fecha", "descripcion", "categoria", "cuenta", "importe"]],
-            use_container_width=True,
-            hide_index=True
+            st.altair_chart(chart2, use_container_width=True)
+
+    # -------------------- TABLA SUMATORIO GASTOS POR CATEGORÍA --------------------
+    st.markdown("---")
+    st.subheader("📋 Sumatorio de gastos por categoría")
+
+    if df_gv.empty:
+        st.info("Sin gastos en el rango.")
+    else:
+        df_sum_cat = (
+            df_gv.groupby("categoria")["importe"]
+            .sum()
+            .sort_values(ascending=False)
+            .reset_index()
+            .rename(columns={"categoria": "Categoría", "importe": "Total €"})
         )
+        df_sum_cat["Total €"] = df_sum_cat["Total €"].astype(float)
 
+        st.dataframe(df_sum_cat, use_container_width=True, hide_index=True)
+
+        st.metric("Total gastos (categorías)", f"{df_sum_cat['Total €'].sum():,.2f} €")
+
+    # -------------------- TOP GASTOS + FILTROS --------------------
+    st.markdown("---")
+    st.subheader("🏆 Top gastos (con filtros)")
+
+    f1, f2, f3 = st.columns([1, 1, 2])
+    with f1:
+        cuenta_f = st.selectbox("Cuenta", ["Todas"] + CUENTAS, key="bal_cuenta_f")
+    with f2:
+        cat_f = st.selectbox("Categoría", ["Todas"] + CATS_GASTOS, key="bal_cat_f")
+    with f3:
+        buscar = st.text_input("Buscar (descripción)", key="bal_buscar", placeholder="ej: supermercado, gasolina...")
+
+    df_top = df_gv.copy()
+    if cuenta_f != "Todas":
+        df_top = df_top[df_top["cuenta"] == cuenta_f]
+    if cat_f != "Todas":
+        df_top = df_top[df_top["categoria"] == cat_f]
+    if buscar:
+        df_top = df_top[df_top["descripcion"].str.contains(buscar, case=False, na=False)]
+
+    df_top = df_top.sort_values("importe", ascending=False).head(25)
+
+    st.dataframe(
+        df_top[["fecha", "descripcion", "categoria", "cuenta", "importe"]],
+        use_container_width=True,
+        hide_index=True
+    )
 
 
 # ---------- TAB HISTÓRICO ----------
