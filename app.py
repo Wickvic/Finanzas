@@ -404,6 +404,20 @@ def add_duplicate_last_row(df_visible: pd.DataFrame, cols_to_dup: List[str]) -> 
     df2 = pd.concat([df2, pd.DataFrame([new])], ignore_index=True)
     return df2
 
+def paginate_df(df: pd.DataFrame, page_key: str, page_size: int):
+    total = len(df)
+    if total == 0:
+        return df, 1, 1, total
+
+    pages = max(1, (total + page_size - 1) // page_size)
+    page = st.session_state.get(page_key, 1)
+    page = min(max(1, page), pages)
+    st.session_state[page_key] = page
+
+    start = (page - 1) * page_size
+    end = min(start + page_size, total)
+    return df.iloc[start:end].copy(), page, pages, total
+
 
 # ---------- PREPARAR PAYLOAD ----------
 def validar_y_preparar_payload_desde_editor(df_edit, modo) -> Tuple[List[str], List[dict], List[dict], List[str]]:
@@ -741,6 +755,26 @@ with tab_gastos:
         df_g = df_g[df_g["descripcion"].str.contains(texto_g, case=False, na=False)]
     df_g = df_g.reset_index(drop=True)
 
+    # Mostrar más filas (paginación)
+    page_size_g = st.selectbox("Filas por página", [50, 100, 200, 500], index=1, key="page_size_g")
+    df_g_page, page_g, pages_g, total_g_rows = paginate_df(df_g, "page_g", page_size_g)
+    
+    nav1, nav2, nav3 = st.columns([1, 2, 1])
+    with nav1:
+        if st.button("⬅️", key="prev_g") and page_g > 1:
+            st.session_state["page_g"] -= 1
+            st.rerun()
+    with nav2:
+        st.caption(f"Página {page_g}/{pages_g} — {total_g_rows} filas")
+    with nav3:
+        if st.button("➡️", key="next_g") and page_g < pages_g:
+            st.session_state["page_g"] += 1
+            st.rerun()
+    
+    # usar la página para el editor
+    df_g = df_g_page.reset_index(drop=True)
+
+
     if df_g.empty:
         df_g = pd.DataFrame([{
             "id": "",
@@ -800,6 +834,24 @@ with tab_ingresos:
     if texto_i:
         df_i = df_i[df_i["descripcion"].str.contains(texto_i, case=False, na=False)]
     df_i = df_i.reset_index(drop=True)
+
+    page_size_i = st.selectbox("Filas por página", [50, 100, 200, 500], index=1, key="page_size_i")
+    df_i_page, page_i, pages_i, total_i_rows = paginate_df(df_i, "page_i", page_size_i)
+    
+    nav1, nav2, nav3 = st.columns([1, 2, 1])
+    with nav1:
+        if st.button("⬅️", key="prev_i") and page_i > 1:
+            st.session_state["page_i"] -= 1
+            st.rerun()
+    with nav2:
+        st.caption(f"Página {page_i}/{pages_i} — {total_i_rows} filas")
+    with nav3:
+        if st.button("➡️", key="next_i") and page_i < pages_i:
+            st.session_state["page_i"] += 1
+            st.rerun()
+    
+    df_i = df_i_page.reset_index(drop=True)
+
 
     if df_i.empty:
         df_i = pd.DataFrame([{
