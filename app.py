@@ -182,11 +182,12 @@ def fetch_movimientos():
     r = SESSION.get(
         url,
         headers=HEADERS,
-        params={"select": "*", "order": "created_at.asc"},  # 👈 antes: fecha.asc
+        params={"select": "*", "order": "fecha.asc,created_at.asc"},
         timeout=TIMEOUT
     )
     r.raise_for_status()
     return r.json()
+
 
 
 def fetch_saldos():
@@ -300,9 +301,11 @@ def preparar_dataframe_base(rows):
 
     df["importe"] = df["importe"].apply(_to_float)
 
-    # 👇 orden por inserción (si existe created_at)
-    if df["created_at_dt"].notna().any():
-        df = df.sort_values(["created_at_dt", "id"], ascending=[True, True])
+    # orden: fecha -> created_at -> id (por estabilidad)
+    if "created_at_dt" in df.columns:
+        df = df.sort_values(["fecha_dt", "created_at_dt", "id"], ascending=[True, True, True])
+    else:
+        df = df.sort_values(["fecha_dt", "id"], ascending=[True, True])
 
     return df
 
