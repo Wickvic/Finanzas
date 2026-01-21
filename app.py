@@ -755,28 +755,23 @@ with tab_gastos:
         df_g = df_g[df_g["descripcion"].str.contains(texto_g, case=False, na=False)]
     df_g = df_g.reset_index(drop=True)
 
-    # Mostrar más filas (paginación)
+    # --- reset page si cambian filtros ---
+    fp_g = (anio_g, mes_g, (texto_g or "").strip().lower())
+    if st.session_state.get("fp_gastos") != fp_g:
+        st.session_state["fp_gastos"] = fp_g
+        st.session_state["page_g"] = 1
+
+    st.caption(f"Movimientos encontrados: {len(df_g)}")
+
+    # --- paginación ---
     page_size_g = st.selectbox("Filas por página", [50, 100, 200, 500], index=1, key="page_size_g")
     df_g_page, page_g, pages_g, total_g_rows = paginate_df(df_g, "page_g", page_size_g)
-    
-    nav1, nav2, nav3 = st.columns([1, 2, 1])
-    with nav1:
-        if st.button("⬅️", key="prev_g") and page_g > 1:
-            st.session_state["page_g"] -= 1
-            st.rerun()
-    with nav2:
-        st.caption(f"Página {page_g}/{pages_g} — {total_g_rows} filas")
-    with nav3:
-        if st.button("➡️", key="next_g") and page_g < pages_g:
-            st.session_state["page_g"] += 1
-            st.rerun()
-    
+
     # usar la página para el editor
-    df_g = df_g_page.reset_index(drop=True)
+    df_g_page = df_g_page.reset_index(drop=True)
 
-
-    if df_g.empty:
-        df_g = pd.DataFrame([{
+    if df_g_page.empty:
+        df_g_page = pd.DataFrame([{
             "id": "",
             "fecha": None,
             "descripcion": "",
@@ -787,7 +782,7 @@ with tab_gastos:
         }])
 
     visible_cols_g = ["fecha", "descripcion", "categoria", "cuenta", "importe"]
-    df_g_editor = build_editor_df(df_g, visible_cols_g, default_cuenta=default_cuenta)
+    df_g_editor = build_editor_df(df_g_page, visible_cols_g, default_cuenta=default_cuenta)
 
     ctop1, _ = st.columns([1, 3])
     with ctop1:
@@ -811,13 +806,28 @@ with tab_gastos:
             "🗑 Eliminar": st.column_config.CheckboxColumn("🗑"),
         },
     )
+
     autosave_nuevas_filas("gastos", df_g_edit, modo="gastos")
+
+    # --- paginación ABAJO ---
+    nav1, nav2, nav3 = st.columns([1, 2, 1])
+    with nav1:
+        if st.button("⬅️", key="prev_g", disabled=(page_g <= 1)):
+            st.session_state["page_g"] -= 1
+            st.rerun()
+    with nav2:
+        st.caption(f"Página {page_g}/{pages_g} — {total_g_rows} filas")
+    with nav3:
+        if st.button("➡️", key="next_g", disabled=(page_g >= pages_g)):
+            st.session_state["page_g"] += 1
+            st.rerun()
 
     unsaved_banner("gastos", df_g_edit, cols=["id", "fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"])
     st.metric("Total gastos (vista actual)", f"{sum(float(parse_importe(x) or 0) for x in df_g_edit['importe'].tolist()):,.2f} €")
 
     if st.button("💾 Guardar cambios", key="save_gastos", disabled=st.session_state["saving"]):
-        guardar_cambios_robusto("gastos", df_g_edit, modo="gastos", cols_fingerprint=["id", "fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"])
+        guardar_cambios_robusto("gastos", df_g_edit, modo="gastos",
+                               cols_fingerprint=["id", "fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"])
 
 
 # ---------- TAB INGRESOS ----------
@@ -835,26 +845,22 @@ with tab_ingresos:
         df_i = df_i[df_i["descripcion"].str.contains(texto_i, case=False, na=False)]
     df_i = df_i.reset_index(drop=True)
 
+    # --- reset page si cambian filtros ---
+    fp_i = (anio_i, mes_i, (texto_i or "").strip().lower())
+    if st.session_state.get("fp_ingresos") != fp_i:
+        st.session_state["fp_ingresos"] = fp_i
+        st.session_state["page_i"] = 1
+
+    st.caption(f"Movimientos encontrados: {len(df_i)}")
+
+    # --- paginación ---
     page_size_i = st.selectbox("Filas por página", [50, 100, 200, 500], index=1, key="page_size_i")
     df_i_page, page_i, pages_i, total_i_rows = paginate_df(df_i, "page_i", page_size_i)
-    
-    nav1, nav2, nav3 = st.columns([1, 2, 1])
-    with nav1:
-        if st.button("⬅️", key="prev_i") and page_i > 1:
-            st.session_state["page_i"] -= 1
-            st.rerun()
-    with nav2:
-        st.caption(f"Página {page_i}/{pages_i} — {total_i_rows} filas")
-    with nav3:
-        if st.button("➡️", key="next_i") and page_i < pages_i:
-            st.session_state["page_i"] += 1
-            st.rerun()
-    
-    df_i = df_i_page.reset_index(drop=True)
 
+    df_i_page = df_i_page.reset_index(drop=True)
 
-    if df_i.empty:
-        df_i = pd.DataFrame([{
+    if df_i_page.empty:
+        df_i_page = pd.DataFrame([{
             "id": "",
             "fecha": None,
             "descripcion": "",
@@ -865,7 +871,7 @@ with tab_ingresos:
         }])
 
     visible_cols_i = ["fecha", "descripcion", "categoria", "cuenta", "importe"]
-    df_i_editor = build_editor_df(df_i, visible_cols_i, default_cuenta=default_cuenta)
+    df_i_editor = build_editor_df(df_i_page, visible_cols_i, default_cuenta=default_cuenta)
 
     if st.button("➕ Duplicar última fila", key="dup_i"):
         df_i_editor = add_duplicate_last_row(df_i_editor, cols_to_dup=visible_cols_i)
@@ -887,13 +893,28 @@ with tab_ingresos:
             "🗑 Eliminar": st.column_config.CheckboxColumn("🗑"),
         },
     )
+
     autosave_nuevas_filas("ingresos", df_i_edit, modo="ingresos")
+
+    # --- paginación ABAJO ---
+    nav1, nav2, nav3 = st.columns([1, 2, 1])
+    with nav1:
+        if st.button("⬅️", key="prev_i", disabled=(page_i <= 1)):
+            st.session_state["page_i"] -= 1
+            st.rerun()
+    with nav2:
+        st.caption(f"Página {page_i}/{pages_i} — {total_i_rows} filas")
+    with nav3:
+        if st.button("➡️", key="next_i", disabled=(page_i >= pages_i)):
+            st.session_state["page_i"] += 1
+            st.rerun()
 
     unsaved_banner("ingresos", df_i_edit, cols=["id", "fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"])
     st.metric("Total ingresos (vista actual)", f"{sum(float(parse_importe(x) or 0) for x in df_i_edit['importe'].tolist()):,.2f} €")
 
     if st.button("💾 Guardar cambios", key="save_ingresos", disabled=st.session_state["saving"]):
-        guardar_cambios_robusto("ingresos", df_i_edit, modo="ingresos", cols_fingerprint=["id", "fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"])
+        guardar_cambios_robusto("ingresos", df_i_edit, modo="ingresos",
+                               cols_fingerprint=["id", "fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"])
 
 
 # ---------- TAB TRANSFERENCIAS ----------
