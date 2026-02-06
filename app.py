@@ -90,7 +90,8 @@ CATS_INGRESOS = [
     "Donativos",
 ]
 
-DB_COLUMNS = ["fecha", "descripcion", "categoria", "cuenta", "cuenta_destino", "importe"]
+# 👇 IMPORTANTE: añadimos "tipo"
+DB_COLUMNS = ["fecha", "descripcion", "categoria", "cuenta", "cuenta_destino", "importe", "tipo"]
 
 MESES_NOMBRES = {
     1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril", 5: "Mayo", 6: "Junio",
@@ -189,7 +190,6 @@ def fetch_movimientos():
     return r.json()
 
 
-
 def fetch_saldos():
     url = f"{BASE_URL}/{TABLE_SALDOS}"
     r = SESSION.get(url, headers=HEADERS, params={"select": "*"}, timeout=TIMEOUT)
@@ -270,6 +270,26 @@ def update_saldo_inicial_upsert(cuenta, saldo):
 
 
 # ---------- DATA ----------
+def _infer_tipo_row(cat: str, cuenta_destino) -> Optional[str]:
+    """
+    Inferencia SOLO para legacy rows sin 'tipo'.
+    'Empresa' se deja en None a propósito (ambigua).
+    """
+    destino_ok = (cuenta_destino not in (None, "", " "))
+    if destino_ok:
+        return "transferencia"
+
+    cat = (cat or "").strip()
+    if cat == "Empresa":
+        return None
+
+    if cat in [c for c in CATS_INGRESOS if c != "Empresa"]:
+        return "ingreso"
+    if cat in [c for c in CATS_GASTOS if c != "Empresa"]:
+        return "gasto"
+    return None
+
+
 def preparar_dataframe_base(rows):
     df = pd.DataFrame(rows) if rows else pd.DataFrame([])
 
@@ -277,7 +297,6 @@ def preparar_dataframe_base(rows):
         if col not in df.columns:
             df[col] = None
 
-    # created_at
     df["created_at_dt"] = pd.to_datetime(df["created_at"], errors="coerce")
 
     df["fecha_dt"] = pd.to_datetime(df["fecha"], errors="coerce")
@@ -301,7 +320,13 @@ def preparar_dataframe_base(rows):
 
     df["importe"] = df["importe"].apply(_to_float)
 
-    # orden: fecha -> created_at -> id (por estabilidad)
+    # tipo: normaliza + crea tipo efectivo (para legacy sin tipo)
+    df["tipo"] = df["tipo"].where(df["tipo"].notna(), None)
+    df["tipo"] = df["tipo"].apply(lambda x: (str(x).strip().lower() if x not in (None, "", " ") else None))
+
+    df["tipo_eff"] = df.apply(lambda r: r["tipo"] or _infer_tipo_row(r.get("categoria"), r.get("cuenta_destino")), axis=1)
+
+    # orden estable
     if "created_at_dt" in df.columns:
         df = df.sort_values(["fecha_dt", "created_at_dt", "id"], ascending=[True, True, True])
     else:
@@ -329,19 +354,22 @@ def calcular_saldos_por_cuenta(df, saldos_iniciales: dict):
         imp = float(row.get("importe") or 0)
         origen = row.get("cuenta")
         destino = row.get("cuenta_destino")
-        cat = row.get("categoria")
+        tipo = row.get("tipo_eff") or row.get("tipo")
 
-        if (destino in (None, "", " ")) and (cat in CATS_INGRESOS):
+        if tipo == "ingreso":
             if origen in saldos:
                 saldos[origen] += imp
-        elif (destino in (None, "", " ")) and (cat in CATS_GASTOS):
+        elif tipo == "gasto":
             if origen in saldos:
                 saldos[origen] -= imp
-        elif destino not in (None, "", " "):
+        elif tipo == "transferencia":
             if origen in saldos:
                 saldos[origen] -= imp
             if destino in saldos:
                 saldos[destino] += imp
+        else:
+            # tipo desconocido: no impacta balances (hasta que lo corrijas)
+            pass
     return saldos
 
 
@@ -368,7 +396,7 @@ def build_editor_df(df_src: pd.DataFrame, visible_cols: List[str], default_cuent
             dfv[c] = None
 
     dfv = dfv[["id"] + visible_cols].copy()
-    dfv = dfv.reset_index(drop=True)  # evita índices raros
+    dfv = dfv.reset_index(drop=True)
 
     if "importe" in dfv.columns:
         dfv["importe"] = dfv["importe"].apply(lambda x: "" if pd.isna(x) else str(x))
@@ -379,8 +407,7 @@ def build_editor_df(df_src: pd.DataFrame, visible_cols: List[str], default_cuent
 
 
 def add_duplicate_last_row(df_visible: pd.DataFrame, cols_to_dup: List[str]) -> pd.DataFrame:
-    df2 = df_visible.copy()
-    df2 = df2.reset_index(drop=True)
+    df2 = df_visible.copy().reset_index(drop=True)
 
     if df2.empty:
         return df2
@@ -395,7 +422,6 @@ def add_duplicate_last_row(df_visible: pd.DataFrame, cols_to_dup: List[str]) -> 
         last_row = df2.iloc[-1]
 
     new = {c: last_row.get(c, "") for c in df2.columns}
-    # fila nueva
     if "id" in new:
         new["id"] = ""
     if "🗑 Eliminar" in new:
@@ -403,6 +429,7 @@ def add_duplicate_last_row(df_visible: pd.DataFrame, cols_to_dup: List[str]) -> 
 
     df2 = pd.concat([df2, pd.DataFrame([new])], ignore_index=True)
     return df2
+
 
 def paginate_df(df: pd.DataFrame, page_key: str, page_size: int):
     total = len(df)
@@ -442,7 +469,6 @@ def validar_y_preparar_payload_desde_editor(df_edit, modo) -> Tuple[List[str], L
             continue
 
         desc = safe_str(r.get("descripcion")).strip()
-
         cuenta = sanitize_choice(r.get("cuenta"), CUENTAS)
         if not cuenta:
             avisos.append(f"Fila {idx+1}: Cuenta inválida o vacía.")
@@ -455,14 +481,23 @@ def validar_y_preparar_payload_desde_editor(df_edit, modo) -> Tuple[List[str], L
             "importe": float(imp),
         }
 
-        if modo in ("gastos", "ingresos"):
-            opciones = CATS_GASTOS if modo == "gastos" else CATS_INGRESOS
-            categoria = sanitize_choice(r.get("categoria"), opciones)
+        if modo == "gastos":
+            categoria = sanitize_choice(r.get("categoria"), CATS_GASTOS)
             if not categoria:
                 avisos.append(f"Fila {idx+1}: Categoría inválida o vacía.")
                 continue
             payload["categoria"] = categoria
             payload["cuenta_destino"] = None
+            payload["tipo"] = "gasto"
+
+        elif modo == "ingresos":
+            categoria = sanitize_choice(r.get("categoria"), CATS_INGRESOS)
+            if not categoria:
+                avisos.append(f"Fila {idx+1}: Categoría inválida o vacía.")
+                continue
+            payload["categoria"] = categoria
+            payload["cuenta_destino"] = None
+            payload["tipo"] = "ingreso"
 
         elif modo == "transferencias":
             cuenta_destino = sanitize_choice(r.get("cuenta_destino"), CUENTAS)
@@ -474,6 +509,7 @@ def validar_y_preparar_payload_desde_editor(df_edit, modo) -> Tuple[List[str], L
                 continue
             payload["categoria"] = "Transferencia"
             payload["cuenta_destino"] = cuenta_destino
+            payload["tipo"] = "transferencia"
 
         if not es_nueva:
             payload_up = dict(payload)
@@ -589,7 +625,7 @@ def invalidate_data():
 st.set_page_config(page_title="Finanzas Familiares", layout="wide")
 st.title("Finanzas familiares")
 
-# CSS: oculta/minimiza índice + columna id
+# CSS: minimiza/oculta id (si no lo oculta 100%, al menos no molesta)
 st.markdown("""
 <style>
 /* Columna id ultra-mini (cabecera + celdas) */
@@ -604,7 +640,6 @@ div[data-testid="stDataEditor"] [data-testid="stDataEditorColumnHeader"][data-co
   border: 0 !important;
 }
 </style>
-
 """, unsafe_allow_html=True)
 
 # Sidebar
@@ -627,6 +662,11 @@ try:
 except Exception as e:
     st.error(f"Error al conectar con Supabase: {e}")
     st.stop()
+
+# aviso filas legacy sin tipo (normalmente serán las antiguas y las de Empresa)
+missing_tipo = int(df_base["tipo_eff"].isna().sum()) if "tipo_eff" in df_base.columns else 0
+if missing_tipo > 0:
+    st.caption(f"ℹ️ Hay {missing_tipo} movimiento(s) sin tipo asignado (por ejemplo 'Empresa'). No se contarán en Gastos/Ingresos/Balances hasta que los clasifiques.")
 
 anios_disponibles = sorted([int(a) for a in df_base["anio"].dropna().unique()], reverse=True) or [date.today().year]
 meses_disponibles = list(range(1, 13))
@@ -663,19 +703,15 @@ def filtros_anio_mes_texto(prefix, modo_movil_local):
             texto = st.text_input("Buscar en descripción", key=f"busca_{prefix}")
         return anio, mes, texto
 
+
 def autosave_nuevas_filas(tab_key: str, df_edit: pd.DataFrame, modo: str):
     """
     Auto-guarda SOLO inserts (filas nuevas con id vacío) cuando estén completas.
-    No toca updates ni borrados. Mantiene el botón de guardar para el resto.
     """
-    # Evita bucles / doble guardado
     if st.session_state.get("saving") or st.session_state.get(f"autosave_lock_{tab_key}", False):
         return
 
-    # Extrae qué se podría guardar
     ids_borrar, rows_upsert, rows_insert, avisos = validar_y_preparar_payload_desde_editor(df_edit, modo=modo)
-
-    # Solo nos interesan INSERTS automáticos
     if not rows_insert:
         return
 
@@ -683,7 +719,6 @@ def autosave_nuevas_filas(tab_key: str, df_edit: pd.DataFrame, modo: str):
     try:
         res_in = insert_movimientos_bulk(rows_insert, generar_uuid=generar_uuid_inserts)
         if res_in is None:
-            # Si falla, no hacemos rerun (para no borrar lo que el usuario estaba escribiendo)
             st.warning("Auto-guardado: no se pudo insertar la nueva fila.")
             return
 
@@ -694,7 +729,6 @@ def autosave_nuevas_filas(tab_key: str, df_edit: pd.DataFrame, modo: str):
         st.session_state[f"autosave_lock_{tab_key}"] = False
 
 
-# ---------- GUARDADO ROBUSTO ----------
 def guardar_cambios_robusto(tab_key: str, df_edit: pd.DataFrame, modo: str, cols_fingerprint: List[str]):
     if st.session_state["saving"]:
         st.info("Guardando…")
@@ -715,7 +749,6 @@ def guardar_cambios_robusto(tab_key: str, df_edit: pd.DataFrame, modo: str, cols
             st.write("Upserts:", len(rows_upsert), "Inserts:", len(rows_insert))
             st.json({"upsert_sample": rows_upsert[:3], "insert_sample": rows_insert[:3]})
 
-        # Orden seguro: primero INSERT/UPSERT; luego DELETE
         res_in = insert_movimientos_bulk(rows_insert, generar_uuid=generar_uuid_inserts)
         if res_in is None:
             st.error("No se pudo guardar (falló INSERT). No se ha borrado nada.")
@@ -746,8 +779,7 @@ with tab_gastos:
     anio_g, mes_g, texto_g = filtros_anio_mes_texto("g", modo_movil)
 
     df_g = df_base.copy()
-    df_g = df_g[df_g["cuenta_destino"].isin([None, "", " "])]
-    df_g = df_g[df_g["categoria"].isin(CATS_GASTOS) | df_g["categoria"].isna() | (df_g["categoria"] == "")]
+    df_g = df_g[df_g["tipo_eff"] == "gasto"]
     df_g = df_g[df_g["anio"] == anio_g]
     if mes_g != "Todos":
         df_g = df_g[df_g["mes"] == mes_g]
@@ -755,7 +787,6 @@ with tab_gastos:
         df_g = df_g[df_g["descripcion"].str.contains(texto_g, case=False, na=False)]
     df_g = df_g.reset_index(drop=True)
 
-    # --- reset page si cambian filtros ---
     fp_g = (anio_g, mes_g, (texto_g or "").strip().lower())
     if st.session_state.get("fp_gastos") != fp_g:
         st.session_state["fp_gastos"] = fp_g
@@ -763,11 +794,8 @@ with tab_gastos:
 
     st.caption(f"Movimientos encontrados: {len(df_g)}")
 
-    # --- paginación ---
     page_size_g = st.selectbox("Filas por página", [50, 100, 200, 500], index=1, key="page_size_g")
     df_g_page, page_g, pages_g, total_g_rows = paginate_df(df_g, "page_g", page_size_g)
-
-    # usar la página para el editor
     df_g_page = df_g_page.reset_index(drop=True)
 
     if df_g_page.empty:
@@ -795,7 +823,7 @@ with tab_gastos:
         num_rows="dynamic",
         use_container_width=True,
         key="editor_gastos",
-        column_order=["fecha","descripcion","categoria","cuenta","importe","🗑 Eliminar","id"],
+        column_order=["fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar", "id"],
         column_config={
             "id": st.column_config.TextColumn("", disabled=True, width="small"),
             "fecha": st.column_config.DateColumn("Fecha", format=DATE_FORMAT),
@@ -809,7 +837,6 @@ with tab_gastos:
 
     autosave_nuevas_filas("gastos", df_g_edit, modo="gastos")
 
-    # --- paginación ABAJO ---
     nav1, nav2, nav3 = st.columns([1, 2, 1])
     with nav1:
         if st.button("⬅️", key="prev_g", disabled=(page_g <= 1)):
@@ -826,8 +853,10 @@ with tab_gastos:
     st.metric("Total gastos (vista actual)", f"{sum(float(parse_importe(x) or 0) for x in df_g_edit['importe'].tolist()):,.2f} €")
 
     if st.button("💾 Guardar cambios", key="save_gastos", disabled=st.session_state["saving"]):
-        guardar_cambios_robusto("gastos", df_g_edit, modo="gastos",
-                               cols_fingerprint=["id", "fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"])
+        guardar_cambios_robusto(
+            "gastos", df_g_edit, modo="gastos",
+            cols_fingerprint=["id", "fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"]
+        )
 
 
 # ---------- TAB INGRESOS ----------
@@ -836,8 +865,7 @@ with tab_ingresos:
     anio_i, mes_i, texto_i = filtros_anio_mes_texto("i", modo_movil)
 
     df_i = df_base.copy()
-    df_i = df_i[df_i["cuenta_destino"].isin([None, "", " "])]
-    df_i = df_i[df_i["categoria"].isin(CATS_INGRESOS) | df_i["categoria"].isna() | (df_i["categoria"] == "")]
+    df_i = df_i[df_i["tipo_eff"] == "ingreso"]
     df_i = df_i[df_i["anio"] == anio_i]
     if mes_i != "Todos":
         df_i = df_i[df_i["mes"] == mes_i]
@@ -845,7 +873,6 @@ with tab_ingresos:
         df_i = df_i[df_i["descripcion"].str.contains(texto_i, case=False, na=False)]
     df_i = df_i.reset_index(drop=True)
 
-    # --- reset page si cambian filtros ---
     fp_i = (anio_i, mes_i, (texto_i or "").strip().lower())
     if st.session_state.get("fp_ingresos") != fp_i:
         st.session_state["fp_ingresos"] = fp_i
@@ -853,10 +880,8 @@ with tab_ingresos:
 
     st.caption(f"Movimientos encontrados: {len(df_i)}")
 
-    # --- paginación ---
     page_size_i = st.selectbox("Filas por página", [50, 100, 200, 500], index=1, key="page_size_i")
     df_i_page, page_i, pages_i, total_i_rows = paginate_df(df_i, "page_i", page_size_i)
-
     df_i_page = df_i_page.reset_index(drop=True)
 
     if df_i_page.empty:
@@ -882,7 +907,7 @@ with tab_ingresos:
         num_rows="dynamic",
         use_container_width=True,
         key="editor_ingresos",
-        column_order=["fecha","descripcion","categoria","cuenta","importe","🗑 Eliminar","id"],
+        column_order=["fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar", "id"],
         column_config={
             "id": st.column_config.TextColumn("", disabled=True, width="small"),
             "fecha": st.column_config.DateColumn("Fecha", format=DATE_FORMAT),
@@ -896,7 +921,6 @@ with tab_ingresos:
 
     autosave_nuevas_filas("ingresos", df_i_edit, modo="ingresos")
 
-    # --- paginación ABAJO ---
     nav1, nav2, nav3 = st.columns([1, 2, 1])
     with nav1:
         if st.button("⬅️", key="prev_i", disabled=(page_i <= 1)):
@@ -913,8 +937,10 @@ with tab_ingresos:
     st.metric("Total ingresos (vista actual)", f"{sum(float(parse_importe(x) or 0) for x in df_i_edit['importe'].tolist()):,.2f} €")
 
     if st.button("💾 Guardar cambios", key="save_ingresos", disabled=st.session_state["saving"]):
-        guardar_cambios_robusto("ingresos", df_i_edit, modo="ingresos",
-                               cols_fingerprint=["id", "fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"])
+        guardar_cambios_robusto(
+            "ingresos", df_i_edit, modo="ingresos",
+            cols_fingerprint=["id", "fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"]
+        )
 
 
 # ---------- TAB TRANSFERENCIAS ----------
@@ -923,7 +949,7 @@ with tab_transf:
     anio_t, mes_t, texto_t = filtros_anio_mes_texto("t", modo_movil)
 
     df_t = df_base.copy()
-    df_t = df_t[~df_t["cuenta_destino"].isin([None, "", " "])]
+    df_t = df_t[df_t["tipo_eff"] == "transferencia"]
     df_t = df_t[df_t["anio"] == anio_t]
     if mes_t != "Todos":
         df_t = df_t[df_t["mes"] == mes_t]
@@ -953,7 +979,7 @@ with tab_transf:
         num_rows="dynamic",
         use_container_width=True,
         key="editor_transf",
-        column_order=["fecha","descripcion","cuenta","cuenta_destino","importe","🗑 Eliminar","id"],
+        column_order=["fecha", "descripcion", "cuenta", "cuenta_destino", "importe", "🗑 Eliminar", "id"],
         column_config={
             "id": st.column_config.TextColumn("", disabled=True, width="small"),
             "fecha": st.column_config.DateColumn("Fecha", format=DATE_FORMAT),
@@ -964,12 +990,15 @@ with tab_transf:
             "🗑 Eliminar": st.column_config.CheckboxColumn("🗑"),
         },
     )
-    autosave_nuevas_filas("transf", df_t_edit, modo="transferencias")
 
+    autosave_nuevas_filas("transf", df_t_edit, modo="transferencias")
     unsaved_banner("transf", df_t_edit, cols=["id", "fecha", "descripcion", "cuenta", "cuenta_destino", "importe", "🗑 Eliminar"])
 
     if st.button("💾 Guardar cambios", key="save_transf", disabled=st.session_state["saving"]):
-        guardar_cambios_robusto("transf", df_t_edit, modo="transferencias", cols_fingerprint=["id", "fecha", "descripcion", "cuenta", "cuenta_destino", "importe", "🗑 Eliminar"])
+        guardar_cambios_robusto(
+            "transf", df_t_edit, modo="transferencias",
+            cols_fingerprint=["id", "fecha", "descripcion", "cuenta", "cuenta_destino", "importe", "🗑 Eliminar"]
+        )
 
 
 # ---------- TAB BALANCES ----------
@@ -979,13 +1008,11 @@ with tab_balances:
     anio_b = st.selectbox("Año", anios_disponibles, key="anio_bal")
     meses_sel = st.multiselect("Meses", options=meses_disponibles, default=meses_disponibles, format_func=nombre_mes)
 
-    # --- Base filtrada ---
     df_v = df_base.copy()
     df_v = df_v[(df_v["anio"] == anio_b) & (df_v["mes"].isin(meses_sel))].copy()
 
-    # Separar gastos/ingresos
-    df_gv = df_v[(df_v["cuenta_destino"].isin([None, "", " "])) & (df_v["categoria"].isin(CATS_GASTOS))].copy()
-    df_iv = df_v[(df_v["cuenta_destino"].isin([None, "", " "])) & (df_v["categoria"].isin(CATS_INGRESOS))].copy()
+    df_gv = df_v[df_v["tipo_eff"] == "gasto"].copy()
+    df_iv = df_v[df_v["tipo_eff"] == "ingreso"].copy()
 
     total_g = float(df_gv["importe"].fillna(0).sum())
     total_i = float(df_iv["importe"].fillna(0).sum())
@@ -995,20 +1022,16 @@ with tab_balances:
     c2.metric("Gastos", f"{total_g:,.2f} €")
     c3.metric("Ahorro", f"{(total_i - total_g):,.2f} €")
 
-    # -------------------- SALDOS POR CUENTA --------------------
     st.markdown("---")
     st.markdown("**Saldos por cuenta (hasta fin del año)**")
     saldos = calcular_saldos_por_cuenta(df_base[df_base["anio"] <= anio_b], saldos_iniciales=saldos_init)
     df_saldos = pd.DataFrame([{"Cuenta": c, "Saldo": saldos.get(c, 0.0)} for c in CUENTAS])
     st.dataframe(df_saldos, use_container_width=True, hide_index=True)
 
-
-    # -------------------- VISUAL PRO --------------------
     st.markdown("---")
     st.subheader("📈 Análisis visual (pro)")
 
-    # Mes label bonito
-    orden_meses = meses_disponibles[:]  # [1..12]
+    orden_meses = meses_disponibles[:]
 
     def _mes_label(m):
         try:
@@ -1016,20 +1039,14 @@ with tab_balances:
         except Exception:
             return str(m)
 
-    df_v["mes_num"] = pd.to_numeric(df_v["mes"], errors="coerce")
-    df_v["mes_label"] = df_v["mes_num"].apply(_mes_label)
-
-    df_gv["mes_num"] = pd.to_numeric(df_gv["mes"], errors="coerce")
-    df_gv["mes_label"] = df_gv["mes_num"].apply(_mes_label)
-
-    df_iv["mes_num"] = pd.to_numeric(df_iv["mes"], errors="coerce")
-    df_iv["mes_label"] = df_iv["mes_num"].apply(_mes_label)
+    for _df in (df_v, df_gv, df_iv):
+        _df["mes_num"] = pd.to_numeric(_df["mes"], errors="coerce")
+        _df["mes_label"] = _df["mes_num"].apply(_mes_label)
 
     meses_en_vista = sorted([int(m) for m in df_v["mes_num"].dropna().unique().tolist()])
 
     cc1, cc2 = st.columns(2)
 
-    # ---------- 1) Ingresos vs Gastos vs Ahorro ----------
     with cc1:
         st.markdown("**Ingresos vs Gastos vs Ahorro**")
 
@@ -1084,7 +1101,6 @@ with tab_balances:
 
         st.altair_chart(chart, use_container_width=True)
 
-    # ---------- 2) Gastos por categoría (1 mes -> barras; varios -> apilado) ----------
     with cc2:
         st.markdown("**Gastos por categoría**")
 
@@ -1147,7 +1163,6 @@ with tab_balances:
 
             st.altair_chart(chart2, use_container_width=True)
 
-    # -------------------- TABLA SUMATORIO GASTOS POR CATEGORÍA --------------------
     st.markdown("---")
     st.subheader("📋 Sumatorio de gastos por categoría")
 
@@ -1162,12 +1177,9 @@ with tab_balances:
             .rename(columns={"categoria": "Categoría", "importe": "Total €"})
         )
         df_sum_cat["Total €"] = df_sum_cat["Total €"].astype(float)
-
         st.dataframe(df_sum_cat, use_container_width=True, hide_index=True)
-
         st.metric("Total gastos (categorías)", f"{df_sum_cat['Total €'].sum():,.2f} €")
 
-    # -------------------- TOP GASTOS + FILTROS --------------------
     st.markdown("---")
     st.subheader("🏆 Top gastos (con filtros)")
 
@@ -1196,7 +1208,6 @@ with tab_balances:
     )
 
 
-
 # ---------- TAB HISTÓRICO ----------
 with tab_hist:
     st.subheader("📚 Histórico")
@@ -1217,13 +1228,10 @@ with tab_hist:
     df_h = df_base.copy()
 
     def detectar_tipo(row):
-        if row["cuenta_destino"] not in (None, "", " "):
-            return "Transferencia"
-        if row["categoria"] in CATS_INGRESOS:
-            return "Ingreso"
-        if row["categoria"] in CATS_GASTOS:
-            return "Gasto"
-        return "Otro"
+        t = row.get("tipo_eff") or row.get("tipo")
+        if not t:
+            return "Otro"
+        return str(t).capitalize()
 
     df_h["tipo"] = df_h.apply(detectar_tipo, axis=1)
 
