@@ -174,7 +174,6 @@ def normalize_tipo(x) -> Optional[str]:
 
 
 def money_key(imp: float) -> str:
-    # estable a 2 decimales para hash
     try:
         return f"{float(imp):.2f}"
     except Exception:
@@ -192,7 +191,7 @@ def build_mov_hash(payload: dict) -> str:
     cuenta = safe_str(payload.get("cuenta")).strip()
     cuenta_destino = safe_str(payload.get("cuenta_destino")).strip()
     categoria = safe_str(payload.get("categoria")).strip()
-    descripcion = safe_str(payload.get("descripcion")).strip()  # respetar case
+    descripcion = safe_str(payload.get("descripcion")).strip()
     importe = money_key(payload.get("importe") or 0.0)
 
     base = "||".join([fecha, tipo, cuenta, cuenta_destino, categoria, importe, descripcion])
@@ -214,10 +213,11 @@ def show_http_error(action: str, r: requests.Response, sample_payload=None):
 # ---------- SUPABASE ----------
 def fetch_movimientos():
     url = f"{BASE_URL}/{TABLE_MOV}"
+    # ✅ Mostramos lo más reciente primero para que lo que insertas aparezca arriba (página 1)
     r = SESSION.get(
         url,
         headers=HEADERS,
-        params={"select": "*", "order": "fecha.asc,created_at.asc"},
+        params={"select": "*", "order": "fecha.desc,created_at.desc"},
         timeout=TIMEOUT
     )
     r.raise_for_status()
@@ -257,7 +257,7 @@ def upsert_movimientos_by_hash(rows: List[dict]):
 
 def upsert_movimientos_by_id(rows: List[dict]):
     """
-    UPSERT por id (para ediciones/borrados). Mantenerlo por si quieres editar filas existentes.
+    UPSERT por id (para ediciones/borrados).
     """
     if not rows:
         return []
@@ -350,7 +350,6 @@ def preparar_dataframe_base(rows):
         if row.get("mov_hash") not in (None, "", " "):
             return str(row.get("mov_hash"))
         t = row.get("tipo")
-        # si no hay tipo, no inventamos: queda None
         if t not in ("gasto", "ingreso", "transferencia"):
             return None
         payload = {
@@ -366,10 +365,11 @@ def preparar_dataframe_base(rows):
 
     df["mov_hash"] = df.apply(lambda r: _ensure_hash(r), axis=1)
 
+    # ✅ Orden: lo más nuevo primero (coherente con fetch)
     if "created_at_dt" in df.columns:
-        df = df.sort_values(["fecha_dt", "created_at_dt", "id"], ascending=[True, True, True])
+        df = df.sort_values(["fecha_dt", "created_at_dt", "id"], ascending=[False, False, False])
     else:
-        df = df.sort_values(["fecha_dt", "id"], ascending=[True, True])
+        df = df.sort_values(["fecha_dt", "id"], ascending=[False, False])
 
     return df
 
@@ -407,7 +407,6 @@ def calcular_saldos_por_cuenta(df, saldos_iniciales: dict):
             if destino in saldos:
                 saldos[destino] += imp
         else:
-            # sin tipo: no afecta balances (hasta que lo arregles)
             pass
     return saldos
 
@@ -556,7 +555,6 @@ def validar_y_preparar_payload_desde_editor(df_edit, modo) -> Tuple[List[str], L
             payload["categoria"] = "Transferencia"
             payload["cuenta_destino"] = cuenta_destino
 
-        # ✅ mov_hash SIEMPRE (dedup fuerte)
         payload["mov_hash"] = build_mov_hash(payload)
 
         if not es_nueva:
@@ -566,7 +564,6 @@ def validar_y_preparar_payload_desde_editor(df_edit, modo) -> Tuple[List[str], L
         else:
             rows_insert.append(payload)
 
-    # dedup dentro del mismo batch (por si el editor mete dos filas iguales)
     def _dedup_rows(rows):
         out = []
         seen = set()
@@ -710,8 +707,8 @@ default_cuenta = st.sidebar.selectbox("Cuenta por defecto (filas nuevas)", CUENT
 modo_movil = st.sidebar.checkbox("📱 Modo móvil compacto", value=False)
 modo_debug = st.sidebar.checkbox("🧪 Debug", value=False)
 
-# autosave ON, pero seguro por mov_hash (no duplica)
-autosave_activo = st.sidebar.checkbox("💾 Auto-guardado inserts", value=True)
+# ✅ Auto-guardado DESACTIVADO (y eliminado de tabs). Solo guardas con botón.
+autosave_activo = False
 
 if "saving" not in st.session_state:
     st.session_state["saving"] = False
@@ -735,10 +732,12 @@ tab_gastos, tab_ingresos, tab_transf, tab_balances, tab_hist, tab_config = st.ta
     ["💸 Gastos", "💰 Ingresos", "🔁 Transferencias", "📊 Balances", "📚 Histórico", "⚙️ Config"]
 )
 
-# aviso importante si hay filas sin tipo (legacy o registros viejos)
 missing_tipo = int(df_base["tipo"].isna().sum()) if "tipo" in df_base.columns else 0
 if missing_tipo > 0:
-    st.caption(f"ℹ️ Hay {missing_tipo} movimiento(s) antiguos sin 'tipo'. No se clasificarán bien hasta que los actualices (puedes editarlos desde Histórico o rehacerlos).")
+    st.caption(
+        f"ℹ️ Hay {missing_tipo} movimiento(s) antiguos sin 'tipo'. "
+        "No se clasificarán bien hasta que los actualices (puedes editarlos desde Histórico o rehacerlos)."
+    )
 
 
 def filtros_anio_mes_texto(prefix, modo_movil_local):
@@ -766,32 +765,6 @@ def filtros_anio_mes_texto(prefix, modo_movil_local):
         with c3:
             texto = st.text_input("Buscar en descripción", key=f"busca_{prefix}")
         return anio, mes, texto
-
-
-def autosave_nuevas_filas(tab_key: str, df_edit: pd.DataFrame, modo: str):
-    if not autosave_activo:
-        return
-    if st.session_state.get("saving") or st.session_state.get(f"autosave_lock_{tab_key}", False):
-        return
-
-    ids_borrar, rows_upsert, rows_insert, avisos = validar_y_preparar_payload_desde_editor(df_edit, modo=modo)
-
-    # autosave SOLO inserts nuevas
-    if not rows_insert:
-        return
-
-    st.session_state[f"autosave_lock_{tab_key}"] = True
-    try:
-        # ✅ Upsert por mov_hash => no duplica
-        res_in = upsert_movimientos_by_hash(rows_insert)
-        if res_in is None:
-            st.warning("Auto-guardado: no se pudo guardar la nueva fila (revisa columnas 'tipo' y 'mov_hash' en Supabase).")
-            return
-        st.toast(f"✅ Auto-guardado ({len(res_in)} fila/s)", icon="💾")
-        invalidate_data()
-        st.rerun()
-    finally:
-        st.session_state[f"autosave_lock_{tab_key}"] = False
 
 
 def guardar_cambios_robusto(tab_key: str, df_edit: pd.DataFrame, modo: str, cols_fingerprint: List[str]):
@@ -903,8 +876,6 @@ with tab_gastos:
         },
     )
 
-    autosave_nuevas_filas("gastos", df_g_edit, modo="gastos")
-
     nav1, nav2, nav3 = st.columns([1, 2, 1])
     with nav1:
         if st.button("⬅️", key="prev_g", disabled=(page_g <= 1)):
@@ -987,8 +958,6 @@ with tab_ingresos:
         },
     )
 
-    autosave_nuevas_filas("ingresos", df_i_edit, modo="ingresos")
-
     nav1, nav2, nav3 = st.columns([1, 2, 1])
     with nav1:
         if st.button("⬅️", key="prev_i", disabled=(page_i <= 1)):
@@ -1059,7 +1028,6 @@ with tab_transf:
         },
     )
 
-    autosave_nuevas_filas("transf", df_t_edit, modo="transferencias")
     unsaved_banner("transf", df_t_edit, cols=["id", "fecha", "descripcion", "cuenta", "cuenta_destino", "importe", "🗑 Eliminar"])
 
     if st.button("💾 Guardar cambios", key="save_transf", disabled=st.session_state["saving"]):
@@ -1247,7 +1215,7 @@ with tab_hist:
 
     st.write("Movimientos encontrados:", len(df_h))
     columnas = ["fecha", "tipo", "descripcion", "categoria", "cuenta", "cuenta_destino", "importe", "mov_hash"]
-    df_hist = df_h[columnas].sort_values("fecha")
+    df_hist = df_h[columnas].sort_values("fecha", ascending=False)
     st.dataframe(df_hist, use_container_width=True, hide_index=True)
 
     excel_bytes_h = df_to_excel_bytes(df_hist, sheet_name="Historico")
