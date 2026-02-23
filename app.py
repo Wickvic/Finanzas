@@ -217,7 +217,7 @@ def fetch_movimientos():
     r = SESSION.get(
         url,
         headers=HEADERS,
-        params={"select": "*", "order": "fecha.desc,created_at.desc"},
+        params={"select": "*", "order": "fecha.asc,created_at.asc"},
         timeout=TIMEOUT
     )
     r.raise_for_status()
@@ -314,22 +314,27 @@ def update_saldo_inicial_upsert(cuenta, saldo):
 def preparar_dataframe_base(rows):
     df = pd.DataFrame(rows) if rows else pd.DataFrame([])
 
+    # Asegurar columnas esperadas
     for col in ["id", "created_at"] + DB_COLUMNS:
         if col not in df.columns:
             df[col] = None
 
+    # Timestamps
     df["created_at_dt"] = pd.to_datetime(df["created_at"], errors="coerce")
 
+    # Fecha principal
     df["fecha_dt"] = pd.to_datetime(df["fecha"], errors="coerce")
     df["fecha"] = df["fecha_dt"].dt.date
     df["anio"] = df["fecha_dt"].dt.year
     df["mes"] = df["fecha_dt"].dt.month
 
+    # Normalizaciones básicas
     df["descripcion"] = df["descripcion"].fillna("").astype(str)
     df["categoria"] = df["categoria"].fillna("").astype(str)
     df["cuenta"] = df["cuenta"].fillna("").astype(str)
     df["cuenta_destino"] = df["cuenta_destino"].where(df["cuenta_destino"].notna(), None)
 
+    # Importe a float
     def _to_float(x):
         if x is None:
             return float("nan")
@@ -344,16 +349,18 @@ def preparar_dataframe_base(rows):
     # tipo normalizado (fuente de verdad)
     df["tipo"] = df["tipo"].apply(normalize_tipo)
 
-    # si no hay mov_hash en rows viejas, lo calculamos localmente para estabilidad,
-    # pero el dedup real exige mov_hash en DB con UNIQUE
+    # mov_hash: si no existe en DB (filas legacy) lo calculamos localmente si hay tipo
     def _ensure_hash(row):
         if row.get("mov_hash") not in (None, "", " "):
             return str(row.get("mov_hash"))
+
         t = row.get("tipo")
         if t not in ("gasto", "ingreso", "transferencia"):
             return None
+
         payload = {
-            "fecha": row.get("fecha_dt").date().isoformat() if pd.notna(row.get("fecha_dt")) else safe_str(row.get("fecha")),
+            "fecha": row.get("fecha_dt").date().isoformat()
+                    if pd.notna(row.get("fecha_dt")) else safe_str(row.get("fecha")),
             "tipo": t,
             "cuenta": row.get("cuenta"),
             "cuenta_destino": row.get("cuenta_destino") or "",
@@ -365,11 +372,11 @@ def preparar_dataframe_base(rows):
 
     df["mov_hash"] = df.apply(lambda r: _ensure_hash(r), axis=1)
 
-    # ✅ Orden: lo más nuevo primero (coherente con fetch)
+    # ✅ ORDEN ASC (como antes): lo más antiguo arriba
     if "created_at_dt" in df.columns:
-        df = df.sort_values(["fecha_dt", "created_at_dt", "id"], ascending=[False, False, False])
+        df = df.sort_values(["fecha_dt", "created_at_dt", "id"], ascending=[True, True, True])
     else:
-        df = df.sort_values(["fecha_dt", "id"], ascending=[False, False])
+        df = df.sort_values(["fecha_dt", "id"], ascending=[True, True])
 
     return df
 
