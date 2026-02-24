@@ -8,6 +8,8 @@ import json
 import hashlib
 import altair as alt
 from typing import List, Tuple, Optional
+from datetime import date as _date
+from datetime import datetime
 
 # ---------- PDF (reportlab) ----------
 try:
@@ -105,6 +107,57 @@ def nombre_mes(m):
 
 
 # ---------- UTIL ----------
+def today_ddmmyyyy() -> str:
+    return _date.today().strftime("%d/%m/%Y")
+
+def parse_fecha_flexible(v: object) -> Optional[str]:
+    """
+    Acepta:
+    - "dd/mm/yyyy"
+    - "yyyy-mm-dd"
+    - "d" o "dd" => dia del mes actual/año actual
+    - "d/m" o "dd/mm" => año actual
+    Devuelve ISO "yyyy-mm-dd" o None si invalida.
+    """
+    if v is None:
+        return None
+    s = str(v).strip()
+    if not s:
+        return None
+
+    # yyyy-mm-dd
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").date().isoformat()
+    except Exception:
+        pass
+
+    # dd/mm/yyyy
+    try:
+        return datetime.strptime(s, "%d/%m/%Y").date().isoformat()
+    except Exception:
+        pass
+
+    # d o dd => mes/año actual
+    if s.isdigit():
+        d = int(s)
+        try:
+            return _date(_date.today().year, _date.today().month, d).isoformat()
+        except Exception:
+            return None
+
+    # d/m o dd/mm => año actual
+    if "/" in s:
+        parts = [p for p in s.split("/") if p.strip() != ""]
+        if len(parts) == 2 and all(p.isdigit() for p in parts):
+            d = int(parts[0])
+            m = int(parts[1])
+            y = _date.today().year
+            try:
+                return _date(y, m, d).isoformat()
+            except Exception:
+                return None
+
+    return None
 def parse_importe(v):
     if v is None:
         return None
@@ -443,6 +496,19 @@ def build_editor_df(df_src: pd.DataFrame, visible_cols: List[str], default_cuent
     dfv = dfv[["id"] + visible_cols].copy()
     dfv = dfv.reset_index(drop=True)
 
+    # fecha como texto dd/mm/yyyy (y si viene date, convertir)
+    if "fecha" in dfv.columns:
+        def _fmt_fecha(x):
+            if x is None or (isinstance(x, float) and pd.isna(x)):
+                return ""
+            try:
+                if isinstance(x, _date):
+                    return x.strftime("%d/%m/%Y")
+            except Exception:
+                pass
+            return str(x)
+        dfv["fecha"] = dfv["fecha"].apply(_fmt_fecha)
+
     if "importe" in dfv.columns:
         dfv["importe"] = dfv["importe"].apply(lambda x: "" if pd.isna(x) else str(x))
 
@@ -513,8 +579,8 @@ def validar_y_preparar_payload_desde_editor(df_edit, modo) -> Tuple[List[str], L
                 ids_borrar.append(rid)
             continue
 
-        fecha = r.get("fecha")
-        if pd.isna(fecha) or fecha in (None, "", "NaT"):
+        fecha_iso = parse_fecha_flexible(r.get("fecha"))
+        if not fecha_iso:
             continue
 
         imp = parse_importe(r.get("importe"))
@@ -528,7 +594,7 @@ def validar_y_preparar_payload_desde_editor(df_edit, modo) -> Tuple[List[str], L
             continue
 
         payload = {
-            "fecha": normalizar_fecha(fecha),
+            "fecha": fecha_iso,
             "descripcion": desc,
             "cuenta": cuenta,
             "importe": float(imp),
@@ -836,9 +902,17 @@ def guardar_cambios_robusto(tab_key: str, df_edit: pd.DataFrame, modo: str, cols
             st.success(f"Guardado OK (inserts: {len(res_in)} | updates: {len(res_up)} | borrados: {len(ids_borrar)})")
 
         mark_saved(tab_key, df_edit, cols_fingerprint)
-        
-        # refresco limpio
+
         invalidate_data()
+        
+        # 👇 SALTAR A LA ÚLTIMA PÁGINA SEGÚN PESTAÑA
+        if tab_key == "gastos":
+            st.session_state["page_g"] = 10**9
+        elif tab_key == "ingresos":
+            st.session_state["page_i"] = 10**9
+        elif tab_key == "transf":
+            st.session_state["page_t"] = 10**9
+        
         st.rerun()
 
     except Exception as e:
@@ -872,28 +946,38 @@ with tab_gastos:
 
     st.caption(f"Movimientos encontrados: {len(df_g)}")
 
-    page_size_g = st.selectbox("Filas por página", [50, 100, 200, 500], index=1, key="page_size_g")
+    # TOTAL DEL FILTRO (no de la pagina)
+    total_filtrado_g = float(df_g["importe"].fillna(0).sum())
+    st.metric("Total gastos (filtro)", f"{total_filtrado_g:,.2f} €")
+
+    page_size_g = st.selectbox("Filas por pagina", [50, 100, 200, 500], index=1, key="page_size_g")
     df_g_page, page_g, pages_g, total_g_rows = paginate_df(df_g, "page_g", page_size_g)
     df_g_page = df_g_page.reset_index(drop=True)
 
     if df_g_page.empty:
         df_g_page = pd.DataFrame([{
             "id": "",
-            "fecha": None,
+            "fecha": today_ddmmyyyy(),   # HOY por defecto (texto)
             "descripcion": "",
             "categoria": "",
             "cuenta": default_cuenta,
             "cuenta_destino": None,
             "importe": "",
         }])
+    else:
+        # asegura que filas nuevas que añadas queden con fecha HOY por defecto al duplicar/crear
+        pass
 
     visible_cols_g = ["fecha", "descripcion", "categoria", "cuenta", "importe"]
     df_g_editor = build_editor_df(df_g_page, visible_cols_g, default_cuenta=default_cuenta)
 
     ctop1, _ = st.columns([1, 3])
     with ctop1:
-        if st.button("➕ Duplicar última fila", key="dup_g"):
+        if st.button("Duplicar ultima fila", key="dup_g"):
             df_g_editor = add_duplicate_last_row(df_g_editor, cols_to_dup=visible_cols_g)
+            # si la fila duplicada queda sin fecha, pon HOY
+            if df_g_editor.at[len(df_g_editor)-1, "fecha"] in ("", None):
+                df_g_editor.at[len(df_g_editor)-1, "fecha"] = today_ddmmyyyy()
 
     df_g_edit = st.data_editor(
         df_g_editor,
@@ -904,32 +988,35 @@ with tab_gastos:
         column_order=["fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar", "id"],
         column_config={
             "id": st.column_config.TextColumn("", disabled=True, width="small"),
-            "fecha": st.column_config.DateColumn("Fecha", format=DATE_FORMAT),
-            "descripcion": st.column_config.TextColumn("Descripción"),
-            "categoria": st.column_config.SelectboxColumn("Categoría", options=CATS_GASTOS),
+            "fecha": st.column_config.TextColumn("Fecha", help="dd/mm/aaaa. Puedes poner solo el dia (ej: 5) o dia/mes (ej: 5/2)"),
+            "descripcion": st.column_config.TextColumn("Descripcion"),
+            "categoria": st.column_config.SelectboxColumn("Categoria", options=CATS_GASTOS),
             "cuenta": st.column_config.SelectboxColumn("Cuenta", options=CUENTAS),
             "importe": st.column_config.TextColumn("Importe"),
-            "🗑 Eliminar": st.column_config.CheckboxColumn("🗑"),
+            "🗑 Eliminar": st.column_config.CheckboxColumn(""),
         },
     )
 
+    # paginacion
     nav1, nav2, nav3 = st.columns([1, 2, 1])
     with nav1:
         if st.button("⬅️", key="prev_g", disabled=(page_g <= 1)):
             st.session_state["page_g"] -= 1
             st.rerun()
     with nav2:
-        st.caption(f"Página {page_g}/{pages_g} — {total_g_rows} filas")
+        st.caption(f"Pagina {page_g}/{pages_g} — {total_g_rows} filas")
     with nav3:
         if st.button("➡️", key="next_g", disabled=(page_g >= pages_g)):
             st.session_state["page_g"] += 1
             st.rerun()
 
     unsaved_banner("gastos", df_g_edit, cols=["id", "fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"])
-    total_g_filtro = float(df_g["importe"].fillna(0).sum())
-    st.metric("Total gastos (filtro)", f"{total_g_filtro:,.2f} €")
 
-    if st.button("💾 Guardar cambios", key="save_gastos"):
+    # GUARDA (form para evitar clicks fantasma)
+    with st.form("form_save_gastos", clear_on_submit=False):
+        submitted_g = st.form_submit_button("Guardar cambios")
+
+    if submitted_g:
         guardar_cambios_robusto(
             "gastos", df_g_edit, modo="gastos",
             cols_fingerprint=["id", "fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"]
@@ -957,14 +1044,18 @@ with tab_ingresos:
 
     st.caption(f"Movimientos encontrados: {len(df_i)}")
 
-    page_size_i = st.selectbox("Filas por página", [50, 100, 200, 500], index=1, key="page_size_i")
+    # TOTAL DEL FILTRO
+    total_filtrado_i = float(df_i["importe"].fillna(0).sum())
+    st.metric("Total ingresos (filtro)", f"{total_filtrado_i:,.2f} €")
+
+    page_size_i = st.selectbox("Filas por pagina", [50, 100, 200, 500], index=1, key="page_size_i")
     df_i_page, page_i, pages_i, total_i_rows = paginate_df(df_i, "page_i", page_size_i)
     df_i_page = df_i_page.reset_index(drop=True)
 
     if df_i_page.empty:
         df_i_page = pd.DataFrame([{
             "id": "",
-            "fecha": None,
+            "fecha": today_ddmmyyyy(),
             "descripcion": "",
             "categoria": "",
             "cuenta": default_cuenta,
@@ -975,8 +1066,10 @@ with tab_ingresos:
     visible_cols_i = ["fecha", "descripcion", "categoria", "cuenta", "importe"]
     df_i_editor = build_editor_df(df_i_page, visible_cols_i, default_cuenta=default_cuenta)
 
-    if st.button("➕ Duplicar última fila", key="dup_i"):
+    if st.button("Duplicar ultima fila", key="dup_i"):
         df_i_editor = add_duplicate_last_row(df_i_editor, cols_to_dup=visible_cols_i)
+        if df_i_editor.at[len(df_i_editor)-1, "fecha"] in ("", None):
+            df_i_editor.at[len(df_i_editor)-1, "fecha"] = today_ddmmyyyy()
 
     df_i_edit = st.data_editor(
         df_i_editor,
@@ -987,12 +1080,12 @@ with tab_ingresos:
         column_order=["fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar", "id"],
         column_config={
             "id": st.column_config.TextColumn("", disabled=True, width="small"),
-            "fecha": st.column_config.DateColumn("Fecha", format=DATE_FORMAT),
-            "descripcion": st.column_config.TextColumn("Descripción"),
-            "categoria": st.column_config.SelectboxColumn("Categoría", options=CATS_INGRESOS),
+            "fecha": st.column_config.TextColumn("Fecha", help="dd/mm/aaaa. Puedes poner solo el dia (ej: 5) o dia/mes (ej: 5/2)"),
+            "descripcion": st.column_config.TextColumn("Descripcion"),
+            "categoria": st.column_config.SelectboxColumn("Categoria", options=CATS_INGRESOS),
             "cuenta": st.column_config.SelectboxColumn("Cuenta", options=CUENTAS),
             "importe": st.column_config.TextColumn("Importe"),
-            "🗑 Eliminar": st.column_config.CheckboxColumn("🗑"),
+            "🗑 Eliminar": st.column_config.CheckboxColumn(""),
         },
     )
 
@@ -1002,16 +1095,18 @@ with tab_ingresos:
             st.session_state["page_i"] -= 1
             st.rerun()
     with nav2:
-        st.caption(f"Página {page_i}/{pages_i} — {total_i_rows} filas")
+        st.caption(f"Pagina {page_i}/{pages_i} — {total_i_rows} filas")
     with nav3:
         if st.button("➡️", key="next_i", disabled=(page_i >= pages_i)):
             st.session_state["page_i"] += 1
             st.rerun()
 
     unsaved_banner("ingresos", df_i_edit, cols=["id", "fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"])
-    total_i_filtro = float(df_i["importe"].fillna(0).sum())
-    st.metric("Total ingresos (filtro)", f"{total_i_filtro:,.2f} €")
-    if st.button("💾 Guardar cambios", key="save_gastos_ing"):
+
+    with st.form("form_save_ingresos", clear_on_submit=False):
+        submitted_i = st.form_submit_button("Guardar cambios")
+
+    if submitted_i:
         guardar_cambios_robusto(
             "ingresos", df_i_edit, modo="ingresos",
             cols_fingerprint=["id", "fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"]
@@ -1032,10 +1127,25 @@ with tab_transf:
         df_t = df_t[df_t["descripcion"].str.contains(texto_t, case=False, na=False)]
     df_t = df_t.reset_index(drop=True)
 
-    if df_t.empty:
-        df_t = pd.DataFrame([{
+    fp_t = (anio_t, mes_t, (texto_t or "").strip().lower())
+    if st.session_state.get("fp_transf") != fp_t:
+        st.session_state["fp_transf"] = fp_t
+        st.session_state["page_t"] = 1
+
+    st.caption(f"Movimientos encontrados: {len(df_t)}")
+
+    # TOTAL DEL FILTRO (en transferencias normalmente no hace falta, pero lo dejo)
+    total_filtrado_t = float(df_t["importe"].fillna(0).sum())
+    st.metric("Total transferencias (filtro)", f"{total_filtrado_t:,.2f} €")
+
+    page_size_t = st.selectbox("Filas por pagina", [50, 100, 200, 500], index=1, key="page_size_t")
+    df_t_page, page_t, pages_t, total_t_rows = paginate_df(df_t, "page_t", page_size_t)
+    df_t_page = df_t_page.reset_index(drop=True)
+
+    if df_t_page.empty:
+        df_t_page = pd.DataFrame([{
             "id": "",
-            "fecha": None,
+            "fecha": today_ddmmyyyy(),
             "descripcion": "",
             "cuenta": default_cuenta,
             "cuenta_destino": "",
@@ -1043,10 +1153,12 @@ with tab_transf:
         }])
 
     visible_cols_t = ["fecha", "descripcion", "cuenta", "cuenta_destino", "importe"]
-    df_t_editor = build_editor_df(df_t, visible_cols_t, default_cuenta=default_cuenta)
+    df_t_editor = build_editor_df(df_t_page, visible_cols_t, default_cuenta=default_cuenta)
 
-    if st.button("➕ Duplicar última fila", key="dup_t"):
+    if st.button("Duplicar ultima fila", key="dup_t"):
         df_t_editor = add_duplicate_last_row(df_t_editor, cols_to_dup=visible_cols_t)
+        if df_t_editor.at[len(df_t_editor)-1, "fecha"] in ("", None):
+            df_t_editor.at[len(df_t_editor)-1, "fecha"] = today_ddmmyyyy()
 
     df_t_edit = st.data_editor(
         df_t_editor,
@@ -1057,18 +1169,33 @@ with tab_transf:
         column_order=["fecha", "descripcion", "cuenta", "cuenta_destino", "importe", "🗑 Eliminar", "id"],
         column_config={
             "id": st.column_config.TextColumn("", disabled=True, width="small"),
-            "fecha": st.column_config.DateColumn("Fecha", format=DATE_FORMAT),
-            "descripcion": st.column_config.TextColumn("Descripción"),
+            "fecha": st.column_config.TextColumn("Fecha", help="dd/mm/aaaa. Puedes poner solo el dia (ej: 5) o dia/mes (ej: 5/2)"),
+            "descripcion": st.column_config.TextColumn("Descripcion"),
             "cuenta": st.column_config.SelectboxColumn("Cuenta origen", options=CUENTAS),
             "cuenta_destino": st.column_config.SelectboxColumn("Cuenta destino", options=CUENTAS),
             "importe": st.column_config.TextColumn("Importe"),
-            "🗑 Eliminar": st.column_config.CheckboxColumn("🗑"),
+            "🗑 Eliminar": st.column_config.CheckboxColumn(""),
         },
     )
 
+    nav1, nav2, nav3 = st.columns([1, 2, 1])
+    with nav1:
+        if st.button("⬅️", key="prev_t", disabled=(page_t <= 1)):
+            st.session_state["page_t"] -= 1
+            st.rerun()
+    with nav2:
+        st.caption(f"Pagina {page_t}/{pages_t} — {total_t_rows} filas")
+    with nav3:
+        if st.button("➡️", key="next_t", disabled=(page_t >= pages_t)):
+            st.session_state["page_t"] += 1
+            st.rerun()
+
     unsaved_banner("transf", df_t_edit, cols=["id", "fecha", "descripcion", "cuenta", "cuenta_destino", "importe", "🗑 Eliminar"])
 
-    if st.button("💾 Guardar cambios", key="save_gastos_trans"):
+    with st.form("form_save_transf", clear_on_submit=False):
+        submitted_t = st.form_submit_button("Guardar cambios")
+
+    if submitted_t:
         guardar_cambios_robusto(
             "transf", df_t_edit, modo="transferencias",
             cols_fingerprint=["id", "fecha", "descripcion", "cuenta", "cuenta_destino", "importe", "🗑 Eliminar"]
