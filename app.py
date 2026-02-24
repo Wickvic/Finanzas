@@ -724,6 +724,12 @@ if st.sidebar.button("🔄 Refrescar datos"):
     invalidate_data()
     st.rerun()
 
+if st.sidebar.button("🧯 Reset locks"):
+    for k in list(st.session_state.keys()):
+        if k.startswith("saving_") or k.startswith("autosave_lock_"):
+            st.session_state[k] = False
+    st.toast("Locks reseteados", icon="🧯")
+
 try:
     load_data_once()
     df_base = st.session_state["df_base"]
@@ -775,50 +781,69 @@ def filtros_anio_mes_texto(prefix, modo_movil_local):
 
 
 def guardar_cambios_robusto(tab_key: str, df_edit: pd.DataFrame, modo: str, cols_fingerprint: List[str]):
-    if st.session_state["saving"]:
-        st.info("Guardando…")
-        return
+    lock_key = f"saving_{tab_key}"
 
-    st.session_state["saving"] = True
-    try:
-        ids_borrar, rows_upsert, rows_insert, avisos = validar_y_preparar_payload_desde_editor(df_edit, modo=modo)
+    # lock por pestaña (evita dobles clicks / reruns raros)
+    if st.session_state.get(lock_key, False):
+        st.warning("Ya hay un guardado en curso en esta pestaña…")
+        return
 
-        if avisos:
-            for a in avisos[:10]:
-                st.warning(a)
-            if len(avisos) > 10:
-                st.caption(f"... +{len(avisos)-10} avisos más")
+    st.session_state[lock_key] = True
+    try:
+        ids_borrar, rows_upsert, rows_insert, avisos = validar_y_preparar_payload_desde_editor(df_edit, modo=modo)
 
-        if modo_debug:
-            st.write("IDs a borrar:", ids_borrar)
-            st.write("Upserts(id):", len(rows_upsert), "Upserts(hash - inserts):", len(rows_insert))
-            st.json({"upsert_id_sample": rows_upsert[:2], "upsert_hash_sample": rows_insert[:2]})
+        if avisos:
+            for a in avisos[:10]:
+                st.warning(a)
+            if len(avisos) > 10:
+                st.caption(f"... +{len(avisos)-10} avisos más")
 
-        # 1) inserts => UPSERT por hash (anti duplicados)
-        res_in = upsert_movimientos_by_hash(rows_insert)
-        if res_in is None:
-            st.error("No se pudo guardar (falló UPSERT por mov_hash). Revisa Supabase: columnas 'tipo' y 'mov_hash' + UNIQUE.")
-            return
+        if not rows_insert and not rows_upsert and not ids_borrar:
+            st.info("No hay cambios válidos para guardar.")
+            return
 
-        # 2) updates => UPSERT por id
-        res_up = upsert_movimientos_by_id(rows_upsert)
-        if res_up is None:
-            st.error("No se pudo guardar (falló UPSERT por id).")
-            return
+        if modo_debug:
+            st.json({
+                "borrar": len(ids_borrar),
+                "updates_id": len(rows_upsert),
+                "inserts_hash": len(rows_insert),
+                "sample_insert": rows_insert[:2],
+                "sample_update": rows_upsert[:2],
+            })
 
-        # 3) deletes
-        ok_del = delete_movimientos_bulk(ids_borrar)
-        if not ok_del:
-            st.error("Guardado parcial: se insertó/actualizó, pero falló el borrado.")
-        else:
-            st.success(f"Guardado ✅ (inserts/dedup: {len(res_in)} | updates: {len(res_up)} | borrados: {len(ids_borrar)})")
+        # 1) inserts: UPSERT por mov_hash (anti duplicados real si hay UNIQUE)
+        res_in = upsert_movimientos_by_hash(rows_insert)
+        if res_in is None:
+            st.error("Falló el guardado de inserts (UPSERT mov_hash). Revisa índice UNIQUE y columnas.")
+            return
 
-        mark_saved(tab_key, df_edit, cols_fingerprint)
-        invalidate_data()
-        st.rerun()
+        # 2) updates: UPSERT por id
+        res_up = upsert_movimientos_by_id(rows_upsert)
+        if res_up is None:
+            st.error("Falló el guardado de updates (UPSERT id).")
+            return
 
-    finally:
-        st.session_state["saving"] = False
+        # 3) deletes
+        ok_del = delete_movimientos_bulk(ids_borrar)
+        if not ok_del:
+            st.error("Guardado parcial: se insertó/actualizó, pero falló el borrado.")
+        else:
+            st.success(f"Guardado ✅ (inserts: {len(res_in)} | updates: {len(res_up)} | borrados: {len(ids_borrar)})")
+
+        mark_saved(tab_key, df_edit, cols_fingerprint)
+
+        # refresco limpio
+        invalidate_data()
+        st.rerun()
+
+    except Exception as e:
+        # CLAVE: si algo revienta, no dejes el lock pillado
+        st.error(f"Error guardando: {e}")
+        if modo_debug:
+            import traceback
+            st.code(traceback.format_exc())
+    finally:
+        st.session_state[lock_key] = False
 
 
 # ---------- TAB GASTOS ----------
@@ -899,7 +924,7 @@ with tab_gastos:
     total_g_filtro = float(df_g["importe"].fillna(0).sum())
     st.metric("Total gastos (filtro)", f"{total_g_filtro:,.2f} €")
 
-    if st.button("💾 Guardar cambios", key="save_gastos", disabled=st.session_state["saving"]):
+    if st.button("💾 Guardar cambios", key="save_gastos"):
         guardar_cambios_robusto(
             "gastos", df_g_edit, modo="gastos",
             cols_fingerprint=["id", "fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"]
@@ -981,7 +1006,7 @@ with tab_ingresos:
     unsaved_banner("ingresos", df_i_edit, cols=["id", "fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"])
     total_i_filtro = float(df_i["importe"].fillna(0).sum())
     st.metric("Total ingresos (filtro)", f"{total_i_filtro:,.2f} €")
-    if st.button("💾 Guardar cambios", key="save_ingresos", disabled=st.session_state["saving"]):
+    if st.button("💾 Guardar cambios", key="save_gastos"):
         guardar_cambios_robusto(
             "ingresos", df_i_edit, modo="ingresos",
             cols_fingerprint=["id", "fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"]
@@ -1038,7 +1063,7 @@ with tab_transf:
 
     unsaved_banner("transf", df_t_edit, cols=["id", "fecha", "descripcion", "cuenta", "cuenta_destino", "importe", "🗑 Eliminar"])
 
-    if st.button("💾 Guardar cambios", key="save_transf", disabled=st.session_state["saving"]):
+    if st.button("💾 Guardar cambios", key="save_gastos"):
         guardar_cambios_robusto(
             "transf", df_t_edit, modo="transferencias",
             cols_fingerprint=["id", "fecha", "descripcion", "cuenta", "cuenta_destino", "importe", "🗑 Eliminar"]
