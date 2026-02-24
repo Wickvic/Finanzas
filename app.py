@@ -786,58 +786,58 @@ def filtros_anio_mes_texto(prefix, modo_movil_local):
         return anio, mes, texto
 
 def guardar_cambios_robusto(tab_key: str, df_edit: pd.DataFrame, modo: str, cols_fingerprint: List[str]):
-    lock_key = f"saving_{tab_key}"
+    lock_key = f"saving_{tab_key}"
 
-    # lock por pestaña (evita dobles clicks / reruns raros)
-    if st.session_state.get(lock_key, False):
-        st.warning("Ya hay un guardado en curso en esta pestaña…")
-        return
+    # lock por pestaña (evita dobles clicks / reruns raros)
+    if st.session_state.get(lock_key, False):
+        st.warning("Ya hay un guardado en curso en esta pestaña...")
+        return
 
-    st.session_state[lock_key] = True
-    try:
-        ids_borrar, rows_upsert, rows_insert, avisos = validar_y_preparar_payload_desde_editor(df_edit, modo=modo)
+    st.session_state[lock_key] = True
+    try:
+        ids_borrar, rows_upsert, rows_insert, avisos = validar_y_preparar_payload_desde_editor(df_edit, modo=modo)
 
-        if avisos:
-            for a in avisos[:10]:
-                st.warning(a)
-            if len(avisos) > 10:
-                st.caption(f"... +{len(avisos)-10} avisos más")
+        if avisos:
+            for a in avisos[:10]:
+                st.warning(a)
+            if len(avisos) > 10:
+                st.caption(f"... +{len(avisos)-10} avisos mas")
 
-        if not rows_insert and not rows_upsert and not ids_borrar:
-            st.info("No hay cambios válidos para guardar.")
-            return
+        if not rows_insert and not rows_upsert and not ids_borrar:
+            st.info("No hay cambios validos para guardar.")
+            return
 
-        if modo_debug:
-            st.json({
-                "borrar": len(ids_borrar),
-                "updates_id": len(rows_upsert),
-                "inserts_hash": len(rows_insert),
-                "sample_insert": rows_insert[:2],
-                "sample_update": rows_upsert[:2],
-            })
+        if modo_debug:
+            st.json({
+                "borrar": len(ids_borrar),
+                "updates_id": len(rows_upsert),
+                "inserts_hash": len(rows_insert),
+                "sample_insert": rows_insert[:2],
+                "sample_update": rows_upsert[:2],
+            })
 
-        # 1) inserts: UPSERT por mov_hash (anti duplicados real si hay UNIQUE)
-        res_in = upsert_movimientos_by_hash(rows_insert)
-        if res_in is None:
-            st.error("Falló el guardado de inserts (UPSERT mov_hash). Revisa índice UNIQUE y columnas.")
-            return
+        # 1) inserts: UPSERT por mov_hash (anti duplicados real si hay UNIQUE)
+        res_in = upsert_movimientos_by_hash(rows_insert)
+        if res_in is None:
+            st.error("Fallo el guardado de inserts (UPSERT mov_hash). Revisa indice UNIQUE y columnas.")
+            return
 
-        # 2) updates: UPSERT por id
-        res_up = upsert_movimientos_by_id(rows_upsert)
-        if res_up is None:
-            st.error("Falló el guardado de updates (UPSERT id).")
-            return
+        # 2) updates: UPSERT por id
+        res_up = upsert_movimientos_by_id(rows_upsert)
+        if res_up is None:
+            st.error("Fallo el guardado de updates (UPSERT id).")
+            return
 
-        # 3) deletes
-        ok_del = delete_movimientos_bulk(ids_borrar)
-        if not ok_del:
-            st.error("Guardado parcial: se insertó/actualizó, pero falló el borrado.")
-        else:
-            st.success(f"Guardado ✅ (inserts: {len(res_in)} | updates: {len(res_up)} | borrados: {len(ids_borrar)})")
+        # 3) deletes
+        ok_del = delete_movimientos_bulk(ids_borrar)
+        if not ok_del:
+            st.error("Guardado parcial: se inserto/actualizo, pero fallo el borrado.")
+        else:
+            st.success(f"Guardado OK (inserts: {len(res_in)} | updates: {len(res_up)} | borrados: {len(ids_borrar)})")
 
-        mark_saved(tab_key, df_edit, cols_fingerprint)
+        mark_saved(tab_key, df_edit, cols_fingerprint)
 
-        # refresco limpio
+        # refresco limpio
         invalidate_data()
         st.rerun()
 
