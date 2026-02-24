@@ -693,7 +693,17 @@ def invalidate_data():
 
 # ---------- APP ----------
 st.set_page_config(page_title="Finanzas Familiares", layout="wide")
-st.title("Finanzas familiares")
+col_title, col_reset = st.columns([6,1])
+
+with col_title:
+    st.title("Finanzas familiares")
+
+with col_reset:
+    if st.button("🧯 Reset locks"):
+        for k in list(st.session_state.keys()):
+            if k.startswith("saving_") or k.startswith("autosave_lock_"):
+                st.session_state[k] = False
+        st.toast("Locks reseteados", icon="🧯")
 
 st.markdown("""
 <style>
@@ -723,12 +733,6 @@ if "saving" not in st.session_state:
 if st.sidebar.button("🔄 Refrescar datos"):
     invalidate_data()
     st.rerun()
-
-if st.sidebar.button("🧯 Reset locks"):
-    for k in list(st.session_state.keys()):
-        if k.startswith("saving_") or k.startswith("autosave_lock_"):
-            st.session_state[k] = False
-    st.toast("Locks reseteados", icon="🧯")
 
 try:
     load_data_once()
