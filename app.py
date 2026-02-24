@@ -896,7 +896,8 @@ with tab_gastos:
             st.rerun()
 
     unsaved_banner("gastos", df_g_edit, cols=["id", "fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"])
-    st.metric("Total gastos (vista actual)", f"{sum(float(parse_importe(x) or 0) for x in df_g_edit['importe'].tolist()):,.2f} €")
+    total_g_filtro = float(df_g["importe"].fillna(0).sum())
+    st.metric("Total gastos (filtro)", f"{total_g_filtro:,.2f} €")
 
     if st.button("💾 Guardar cambios", key="save_gastos", disabled=st.session_state["saving"]):
         guardar_cambios_robusto(
@@ -978,8 +979,8 @@ with tab_ingresos:
             st.rerun()
 
     unsaved_banner("ingresos", df_i_edit, cols=["id", "fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"])
-    st.metric("Total ingresos (vista actual)", f"{sum(float(parse_importe(x) or 0) for x in df_i_edit['importe'].tolist()):,.2f} €")
-
+    total_i_filtro = float(df_i["importe"].fillna(0).sum())
+    st.metric("Total ingresos (filtro)", f"{total_i_filtro:,.2f} €")
     if st.button("💾 Guardar cambios", key="save_ingresos", disabled=st.session_state["saving"]):
         guardar_cambios_robusto(
             "ingresos", df_i_edit, modo="ingresos",
