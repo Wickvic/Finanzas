@@ -495,32 +495,49 @@ def calcular_saldos_por_cuenta(df, saldos_iniciales: dict):
 
 # ---------- Editor helpers ----------
 
-from datetime import date, datetime
 import pandas as pd
+from datetime import date, datetime
 
-def coerce_to_date(x):
-    """Convierte varios formatos a datetime.date o None."""
-    if x is None or (isinstance(x, float) and pd.isna(x)):
-        return None
-    if isinstance(x, date) and not isinstance(x, datetime):
-        return x
+def coerce_to_ts(x):
+    """Devuelve pandas.Timestamp normalizado (00:00) o pd.NaT."""
+    if x is None:
+        return pd.NaT
+    if isinstance(x, float) and pd.isna(x):
+        return pd.NaT
+
+    # pandas Timestamp / datetime
+    if isinstance(x, pd.Timestamp):
+        return x.normalize()
     if isinstance(x, datetime):
-        return x.date()
+        return pd.Timestamp(x).normalize()
+
+    # date (python)
+    if isinstance(x, date) and not isinstance(x, datetime):
+        return pd.Timestamp(x).normalize()
+
+    # strings
     if isinstance(x, str):
         s = x.strip()
         if not s:
-            return None
-        # acepta 'YYYY-MM-DD'
+            return pd.NaT
+
+        # ISO: YYYY-MM-DD
         try:
-            return datetime.strptime(s, "%Y-%m-%d").date()
+            return pd.to_datetime(s, format="%Y-%m-%d", errors="raise").normalize()
         except Exception:
             pass
-        # acepta 'DD/MM/YYYY'
+
+        # ES: DD/MM/YYYY
         try:
-            return datetime.strptime(s, "%d/%m/%Y").date()
+            return pd.to_datetime(s, format="%d/%m/%Y", errors="raise").normalize()
         except Exception:
-            return None
-    return None
+            return pd.NaT
+
+    # fallback
+    try:
+        return pd.to_datetime(x, errors="coerce").normalize()
+    except Exception:
+        return pd.NaT
 
 
 def aplicar_defaults_df_editor(df_visible, default_cuenta="Principal"):
@@ -538,11 +555,13 @@ def aplicar_defaults_df_editor(df_visible, default_cuenta="Principal"):
 
 from datetime import date as _date
 
+import pandas as pd
+
 def new_row_defaults(modo: str, default_cuenta: str):
-    hoy = _date.today()
+    hoy = pd.Timestamp.today().normalize()  # ✅ dtype datetime64[ns]
     base = {
         "id": "",
-        "fecha": hoy,                # ✅ hoy por defecto
+        "fecha": hoy,
         "descripcion": "",
         "importe": "",
         "🗑 Eliminar": False,
@@ -550,10 +569,11 @@ def new_row_defaults(modo: str, default_cuenta: str):
 
     if modo in ("gastos", "ingresos"):
         base["categoria"] = ""
-        base["cuenta"] = default_cuenta  # ✅ cuenta por defecto
+        base["cuenta"] = default_cuenta
+        base["cuenta_destino"] = None
     elif modo == "transferencias":
         base["cuenta"] = default_cuenta
-        base["cuenta_destino"] = ""      # el usuario elige
+        base["cuenta_destino"] = ""   # el usuario elige
     return base
 
 def ensure_min_rows(df_editor: pd.DataFrame, modo: str, default_cuenta: str, min_rows: int = 8):
@@ -580,17 +600,19 @@ def build_editor_df(df_page: pd.DataFrame, visible_cols: list, default_cuenta: s
         if c not in df.columns:
             df[c] = None
 
-    # ✅ fecha como date (no texto)
-    df["fecha"] = df["fecha"].apply(coerce_to_date)
+    # ✅ fecha SIEMPRE datetime64[ns]
+    df["fecha"] = df["fecha"].apply(coerce_to_ts)
+    df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce")  # fuerza dtype datetime64[ns]
 
-    # defaults razonables si vienen vacíos (en filas existentes)
+    # defaults cuenta
     df["cuenta"] = df["cuenta"].fillna("").replace("", default_cuenta)
 
-    # columna eliminar si no existe
+    # eliminar
     if "🗑 Eliminar" not in df.columns:
         df["🗑 Eliminar"] = False
+    df["🗑 Eliminar"] = df["🗑 Eliminar"].fillna(False).astype(bool)
 
-    # orden de columnas para editor (mantén id al final)
+    # orden columnas
     cols = list(dict.fromkeys(visible_cols + ["🗑 Eliminar", "id"]))
     df = df[cols]
 
@@ -644,7 +666,11 @@ def validar_y_preparar_payload_desde_editor(df_edit, modo) -> Tuple[List[str], L
     - rows_upsert: filas con id (ediciones)
     """
     ids_borrar, rows_upsert, rows_insert, avisos = [], [], [], []
-
+    def ts_to_iso_date(x):
+        t = coerce_to_ts(x)
+        if pd.isna(t):
+            return None
+    return t.date().isoformat()   # ✅ 'YYYY-MM-DD'
     tipo_forzado = {"gastos": "gasto", "ingresos": "ingreso", "transferencias": "transferencia"}.get(modo)
     if tipo_forzado is None:
         tipo_forzado = None
@@ -659,7 +685,7 @@ def validar_y_preparar_payload_desde_editor(df_edit, modo) -> Tuple[List[str], L
                 ids_borrar.append(rid)
             continue
 
-        fecha_iso = parse_fecha_flexible(r.get("fecha"))
+        fecha_iso = ts_to_iso_date(r.get("fecha"))
         if not fecha_iso:
             continue
 
@@ -1081,7 +1107,7 @@ with tab_gastos:
             "fecha": st.column_config.DateColumn(
                 "Fecha",
                 format="DD/MM/YYYY",
-                help="Se guarda como fecha real (date) en Supabase."
+                help="Por defecto HOY. Tab sin tocar = se queda HOY."
             ),
             "descripcion": st.column_config.TextColumn("Descripcion"),
             "categoria": st.column_config.SelectboxColumn("Categoria", options=CATS_GASTOS),
@@ -1188,7 +1214,7 @@ with tab_ingresos:
             "fecha": st.column_config.DateColumn(
                 "Fecha",
                 format="DD/MM/YYYY",
-                help="Se guarda como fecha real (date) en Supabase."
+                help="Por defecto HOY. Tab sin tocar = se queda HOY."
             ),
             "descripcion": st.column_config.TextColumn("Descripcion"),
             "categoria": st.column_config.SelectboxColumn("Categoria", options=CATS_INGRESOS),
@@ -1292,7 +1318,7 @@ with tab_transf:
             "fecha": st.column_config.DateColumn(
                 "Fecha",
                 format="DD/MM/YYYY",
-                help="Se guarda como fecha real (date) en Supabase."
+                help="Por defecto HOY. Tab sin tocar = se queda HOY."
             ),
             "descripcion": st.column_config.TextColumn("Descripcion"),
             "cuenta": st.column_config.SelectboxColumn("Cuenta origen", options=CUENTAS),
