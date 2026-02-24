@@ -107,6 +107,28 @@ def nombre_mes(m):
 
 
 # ---------- UTIL ----------
+import time
+
+def lock_acquire(lock_key: str, ttl_seconds: int = 12) -> bool:
+    """
+    Lock con caducidad para evitar quedarse pillado.
+    """
+    now = time.time()
+    lock = st.session_state.get(lock_key, None)
+
+    # lock = {"ts": float}
+    if isinstance(lock, dict) and "ts" in lock:
+        if (now - lock["ts"]) < ttl_seconds:
+            return False  # sigue activo
+        # expiró
+        st.session_state.pop(lock_key, None)
+
+    st.session_state[lock_key] = {"ts": now}
+    return True
+
+def lock_release(lock_key: str):
+    st.session_state.pop(lock_key, None)
+    
 def today_ddmmyyyy() -> str:
     return _date.today().strftime("%d/%m/%Y")
 
@@ -472,6 +494,35 @@ def calcular_saldos_por_cuenta(df, saldos_iniciales: dict):
 
 
 # ---------- Editor helpers ----------
+
+from datetime import date, datetime
+import pandas as pd
+
+def coerce_to_date(x):
+    """Convierte varios formatos a datetime.date o None."""
+    if x is None or (isinstance(x, float) and pd.isna(x)):
+        return None
+    if isinstance(x, date) and not isinstance(x, datetime):
+        return x
+    if isinstance(x, datetime):
+        return x.date()
+    if isinstance(x, str):
+        s = x.strip()
+        if not s:
+            return None
+        # acepta 'YYYY-MM-DD'
+        try:
+            return datetime.strptime(s, "%Y-%m-%d").date()
+        except Exception:
+            pass
+        # acepta 'DD/MM/YYYY'
+        try:
+            return datetime.strptime(s, "%d/%m/%Y").date()
+        except Exception:
+            return None
+    return None
+
+
 def aplicar_defaults_df_editor(df_visible, default_cuenta="Principal"):
     df2 = df_visible.copy()
     if "cuenta" not in df2.columns:
@@ -485,36 +536,65 @@ def aplicar_defaults_df_editor(df_visible, default_cuenta="Principal"):
             df2.at[i, "cuenta"] = default_cuenta
     return df2
 
+from datetime import date as _date
 
-def build_editor_df(df_src: pd.DataFrame, visible_cols: List[str], default_cuenta: str) -> pd.DataFrame:
-    dfv = df_src.copy()
+def new_row_defaults(modo: str, default_cuenta: str):
+    hoy = _date.today()
+    base = {
+        "id": "",
+        "fecha": hoy,                # ✅ hoy por defecto
+        "descripcion": "",
+        "importe": "",
+        "🗑 Eliminar": False,
+    }
 
-    for c in ["id"] + visible_cols:
-        if c not in dfv.columns:
-            dfv[c] = None
+    if modo in ("gastos", "ingresos"):
+        base["categoria"] = ""
+        base["cuenta"] = default_cuenta  # ✅ cuenta por defecto
+    elif modo == "transferencias":
+        base["cuenta"] = default_cuenta
+        base["cuenta_destino"] = ""      # el usuario elige
+    return base
 
-    dfv = dfv[["id"] + visible_cols].copy()
-    dfv = dfv.reset_index(drop=True)
+def ensure_min_rows(df_editor: pd.DataFrame, modo: str, default_cuenta: str, min_rows: int = 8):
+    """
+    Asegura que el editor tenga al menos min_rows filas y que las filas nuevas
+    vengan con fecha/cuenta por defecto.
+    """
+    df2 = df_editor.copy().reset_index(drop=True)
+    while len(df2) < min_rows:
+        df2 = pd.concat([df2, pd.DataFrame([new_row_defaults(modo, default_cuenta)])], ignore_index=True)
+    return df2
 
-    # fecha como texto dd/mm/yyyy (y si viene date, convertir)
-    if "fecha" in dfv.columns:
-        def _fmt_fecha(x):
-            if x is None or (isinstance(x, float) and pd.isna(x)):
-                return ""
-            try:
-                if isinstance(x, _date):
-                    return x.strftime("%d/%m/%Y")
-            except Exception:
-                pass
-            return str(x)
-        dfv["fecha"] = dfv["fecha"].apply(_fmt_fecha)
+def add_row(df_editor: pd.DataFrame, modo: str, default_cuenta: str) -> pd.DataFrame:
+    df2 = df_editor.copy().reset_index(drop=True)
+    df2 = pd.concat([df2, pd.DataFrame([new_row_defaults(modo, default_cuenta)])], ignore_index=True)
+    return df2
+    
 
-    if "importe" in dfv.columns:
-        dfv["importe"] = dfv["importe"].apply(lambda x: "" if pd.isna(x) else str(x))
+def build_editor_df(df_page: pd.DataFrame, visible_cols: list, default_cuenta: str) -> pd.DataFrame:
+    df = df_page.copy()
 
-    dfv["🗑 Eliminar"] = False
-    dfv = aplicar_defaults_df_editor(dfv, default_cuenta=default_cuenta)
-    return dfv
+    # columnas base si faltan
+    for c in ["id", "fecha", "descripcion", "categoria", "cuenta", "cuenta_destino", "importe"]:
+        if c not in df.columns:
+            df[c] = None
+
+    # ✅ fecha como date (no texto)
+    df["fecha"] = df["fecha"].apply(coerce_to_date)
+
+    # defaults razonables si vienen vacíos (en filas existentes)
+    df["cuenta"] = df["cuenta"].fillna("").replace("", default_cuenta)
+
+    # columna eliminar si no existe
+    if "🗑 Eliminar" not in df.columns:
+        df["🗑 Eliminar"] = False
+
+    # orden de columnas para editor (mantén id al final)
+    cols = list(dict.fromkeys(visible_cols + ["🗑 Eliminar", "id"]))
+    df = df[cols]
+
+    return df
 
 
 def add_duplicate_last_row(df_visible: pd.DataFrame, cols_to_dup: List[str]) -> pd.DataFrame:
@@ -954,41 +1034,55 @@ with tab_gastos:
     df_g_page, page_g, pages_g, total_g_rows = paginate_df(df_g, "page_g", page_size_g)
     df_g_page = df_g_page.reset_index(drop=True)
 
-    if df_g_page.empty:
-        df_g_page = pd.DataFrame([{
-            "id": "",
-            "fecha": today_ddmmyyyy(),   # HOY por defecto (texto)
-            "descripcion": "",
-            "categoria": "",
-            "cuenta": default_cuenta,
-            "cuenta_destino": None,
-            "importe": "",
-        }])
-    else:
-        # asegura que filas nuevas que añadas queden con fecha HOY por defecto al duplicar/crear
-        pass
-
+    # Editor base
     visible_cols_g = ["fecha", "descripcion", "categoria", "cuenta", "importe"]
     df_g_editor = build_editor_df(df_g_page, visible_cols_g, default_cuenta=default_cuenta)
 
-    ctop1, _ = st.columns([1, 3])
+    # estado persistente (para no perder filas al paginar / reruns)
+    if "gastos_editor_df" not in st.session_state:
+        st.session_state["gastos_editor_df"] = df_g_editor.copy()
+    else:
+        # si cambia la página, refrescamos el editor con los datos de la página (sin machacar si ya hay edits)
+        st.session_state["gastos_editor_df"] = df_g_editor.copy()
+
+    # Botones fila
+    ctop1, ctop2, _ = st.columns([1, 1, 3])
     with ctop1:
+        if st.button("➕ Añadir fila", key="add_g"):
+            st.session_state["gastos_editor_df"] = add_row(
+                st.session_state["gastos_editor_df"], "gastos", default_cuenta
+            )
+    with ctop2:
         if st.button("Duplicar ultima fila", key="dup_g"):
-            df_g_editor = add_duplicate_last_row(df_g_editor, cols_to_dup=visible_cols_g)
+            st.session_state["gastos_editor_df"] = add_duplicate_last_row(
+                st.session_state["gastos_editor_df"], cols_to_dup=visible_cols_g
+            )
             # si la fila duplicada queda sin fecha, pon HOY
-            if df_g_editor.at[len(df_g_editor)-1, "fecha"] in ("", None):
-                df_g_editor.at[len(df_g_editor)-1, "fecha"] = today_ddmmyyyy()
+            last_idx = len(st.session_state["gastos_editor_df"]) - 1
+            if st.session_state["gastos_editor_df"].at[last_idx, "fecha"] in ("", None):
+                st.session_state["gastos_editor_df"].at[last_idx, "fecha"] = date.today()
+            if st.session_state["gastos_editor_df"].at[last_idx, "cuenta"] in ("", None):
+                st.session_state["gastos_editor_df"].at[last_idx, "cuenta"] = default_cuenta
+
+    # Asegura mínimo filas visibles (sin dynamic)
+    st.session_state["gastos_editor_df"] = ensure_min_rows(
+        st.session_state["gastos_editor_df"], "gastos", default_cuenta, min_rows=8
+    )
 
     df_g_edit = st.data_editor(
-        df_g_editor,
+        st.session_state["gastos_editor_df"],
         hide_index=True,
-        num_rows="dynamic",
+        num_rows="fixed",  # ✅ sin filas fantasma
         use_container_width=True,
         key="editor_gastos",
         column_order=["fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar", "id"],
         column_config={
             "id": st.column_config.TextColumn("", disabled=True, width="small"),
-            "fecha": st.column_config.TextColumn("Fecha", help="dd/mm/aaaa. Puedes poner solo el dia (ej: 5) o dia/mes (ej: 5/2)"),
+            "fecha": st.column_config.DateColumn(
+                "Fecha",
+                format="DD/MM/YYYY",
+                help="Se guarda como fecha real (date) en Supabase."
+            ),
             "descripcion": st.column_config.TextColumn("Descripcion"),
             "categoria": st.column_config.SelectboxColumn("Categoria", options=CATS_GASTOS),
             "cuenta": st.column_config.SelectboxColumn("Cuenta", options=CUENTAS),
@@ -996,6 +1090,7 @@ with tab_gastos:
             "🗑 Eliminar": st.column_config.CheckboxColumn(""),
         },
     )
+    st.session_state["gastos_editor_df"] = df_g_edit.copy()
 
     # paginacion
     nav1, nav2, nav3 = st.columns([1, 2, 1])
@@ -1052,35 +1147,49 @@ with tab_ingresos:
     df_i_page, page_i, pages_i, total_i_rows = paginate_df(df_i, "page_i", page_size_i)
     df_i_page = df_i_page.reset_index(drop=True)
 
-    if df_i_page.empty:
-        df_i_page = pd.DataFrame([{
-            "id": "",
-            "fecha": today_ddmmyyyy(),
-            "descripcion": "",
-            "categoria": "",
-            "cuenta": default_cuenta,
-            "cuenta_destino": None,
-            "importe": "",
-        }])
-
     visible_cols_i = ["fecha", "descripcion", "categoria", "cuenta", "importe"]
     df_i_editor = build_editor_df(df_i_page, visible_cols_i, default_cuenta=default_cuenta)
 
-    if st.button("Duplicar ultima fila", key="dup_i"):
-        df_i_editor = add_duplicate_last_row(df_i_editor, cols_to_dup=visible_cols_i)
-        if df_i_editor.at[len(df_i_editor)-1, "fecha"] in ("", None):
-            df_i_editor.at[len(df_i_editor)-1, "fecha"] = today_ddmmyyyy()
+    if "ingresos_editor_df" not in st.session_state:
+        st.session_state["ingresos_editor_df"] = df_i_editor.copy()
+    else:
+        st.session_state["ingresos_editor_df"] = df_i_editor.copy()
+
+    ctop1, ctop2, _ = st.columns([1, 1, 3])
+    with ctop1:
+        if st.button("➕ Añadir fila", key="add_i"):
+            st.session_state["ingresos_editor_df"] = add_row(
+                st.session_state["ingresos_editor_df"], "ingresos", default_cuenta
+            )
+    with ctop2:
+        if st.button("Duplicar ultima fila", key="dup_i"):
+            st.session_state["ingresos_editor_df"] = add_duplicate_last_row(
+                st.session_state["ingresos_editor_df"], cols_to_dup=visible_cols_i
+            )
+            last_idx = len(st.session_state["ingresos_editor_df"]) - 1
+            if st.session_state["ingresos_editor_df"].at[last_idx, "fecha"] in ("", None):
+                st.session_state["ingresos_editor_df"].at[last_idx, "fecha"] = date.today()
+            if st.session_state["ingresos_editor_df"].at[last_idx, "cuenta"] in ("", None):
+                st.session_state["ingresos_editor_df"].at[last_idx, "cuenta"] = default_cuenta
+
+    st.session_state["ingresos_editor_df"] = ensure_min_rows(
+        st.session_state["ingresos_editor_df"], "ingresos", default_cuenta, min_rows=8
+    )
 
     df_i_edit = st.data_editor(
-        df_i_editor,
+        st.session_state["ingresos_editor_df"],
         hide_index=True,
-        num_rows="dynamic",
+        num_rows="fixed",
         use_container_width=True,
         key="editor_ingresos",
         column_order=["fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar", "id"],
         column_config={
             "id": st.column_config.TextColumn("", disabled=True, width="small"),
-            "fecha": st.column_config.TextColumn("Fecha", help="dd/mm/aaaa. Puedes poner solo el dia (ej: 5) o dia/mes (ej: 5/2)"),
+            "fecha": st.column_config.DateColumn(
+                "Fecha",
+                format="DD/MM/YYYY",
+                help="Se guarda como fecha real (date) en Supabase."
+            ),
             "descripcion": st.column_config.TextColumn("Descripcion"),
             "categoria": st.column_config.SelectboxColumn("Categoria", options=CATS_INGRESOS),
             "cuenta": st.column_config.SelectboxColumn("Cuenta", options=CUENTAS),
@@ -1088,6 +1197,7 @@ with tab_ingresos:
             "🗑 Eliminar": st.column_config.CheckboxColumn(""),
         },
     )
+    st.session_state["ingresos_editor_df"] = df_i_edit.copy()
 
     nav1, nav2, nav3 = st.columns([1, 2, 1])
     with nav1:
@@ -1134,7 +1244,6 @@ with tab_transf:
 
     st.caption(f"Movimientos encontrados: {len(df_t)}")
 
-    # TOTAL DEL FILTRO (en transferencias normalmente no hace falta, pero lo dejo)
     total_filtrado_t = float(df_t["importe"].fillna(0).sum())
     st.metric("Total transferencias (filtro)", f"{total_filtrado_t:,.2f} €")
 
@@ -1142,34 +1251,49 @@ with tab_transf:
     df_t_page, page_t, pages_t, total_t_rows = paginate_df(df_t, "page_t", page_size_t)
     df_t_page = df_t_page.reset_index(drop=True)
 
-    if df_t_page.empty:
-        df_t_page = pd.DataFrame([{
-            "id": "",
-            "fecha": today_ddmmyyyy(),
-            "descripcion": "",
-            "cuenta": default_cuenta,
-            "cuenta_destino": "",
-            "importe": "",
-        }])
-
     visible_cols_t = ["fecha", "descripcion", "cuenta", "cuenta_destino", "importe"]
     df_t_editor = build_editor_df(df_t_page, visible_cols_t, default_cuenta=default_cuenta)
 
-    if st.button("Duplicar ultima fila", key="dup_t"):
-        df_t_editor = add_duplicate_last_row(df_t_editor, cols_to_dup=visible_cols_t)
-        if df_t_editor.at[len(df_t_editor)-1, "fecha"] in ("", None):
-            df_t_editor.at[len(df_t_editor)-1, "fecha"] = today_ddmmyyyy()
+    if "transf_editor_df" not in st.session_state:
+        st.session_state["transf_editor_df"] = df_t_editor.copy()
+    else:
+        st.session_state["transf_editor_df"] = df_t_editor.copy()
+
+    ctop1, ctop2, _ = st.columns([1, 1, 3])
+    with ctop1:
+        if st.button("➕ Añadir fila", key="add_t"):
+            st.session_state["transf_editor_df"] = add_row(
+                st.session_state["transf_editor_df"], "transferencias", default_cuenta
+            )
+    with ctop2:
+        if st.button("Duplicar ultima fila", key="dup_t"):
+            st.session_state["transf_editor_df"] = add_duplicate_last_row(
+                st.session_state["transf_editor_df"], cols_to_dup=visible_cols_t
+            )
+            last_idx = len(st.session_state["transf_editor_df"]) - 1
+            if st.session_state["transf_editor_df"].at[last_idx, "fecha"] in ("", None):
+                st.session_state["transf_editor_df"].at[last_idx, "fecha"] = date.today()
+            if st.session_state["transf_editor_df"].at[last_idx, "cuenta"] in ("", None):
+                st.session_state["transf_editor_df"].at[last_idx, "cuenta"] = default_cuenta
+
+    st.session_state["transf_editor_df"] = ensure_min_rows(
+        st.session_state["transf_editor_df"], "transferencias", default_cuenta, min_rows=8
+    )
 
     df_t_edit = st.data_editor(
-        df_t_editor,
+        st.session_state["transf_editor_df"],
         hide_index=True,
-        num_rows="dynamic",
+        num_rows="fixed",
         use_container_width=True,
         key="editor_transf",
         column_order=["fecha", "descripcion", "cuenta", "cuenta_destino", "importe", "🗑 Eliminar", "id"],
         column_config={
             "id": st.column_config.TextColumn("", disabled=True, width="small"),
-            "fecha": st.column_config.TextColumn("Fecha", help="dd/mm/aaaa. Puedes poner solo el dia (ej: 5) o dia/mes (ej: 5/2)"),
+            "fecha": st.column_config.DateColumn(
+                "Fecha",
+                format="DD/MM/YYYY",
+                help="Se guarda como fecha real (date) en Supabase."
+            ),
             "descripcion": st.column_config.TextColumn("Descripcion"),
             "cuenta": st.column_config.SelectboxColumn("Cuenta origen", options=CUENTAS),
             "cuenta_destino": st.column_config.SelectboxColumn("Cuenta destino", options=CUENTAS),
@@ -1177,6 +1301,7 @@ with tab_transf:
             "🗑 Eliminar": st.column_config.CheckboxColumn(""),
         },
     )
+    st.session_state["transf_editor_df"] = df_t_edit.copy()
 
     nav1, nav2, nav3 = st.columns([1, 2, 1])
     with nav1:
