@@ -715,7 +715,7 @@ modo_movil = st.sidebar.checkbox("📱 Modo móvil compacto", value=False)
 modo_debug = st.sidebar.checkbox("🧪 Debug", value=False)
 
 # ✅ Auto-guardado DESACTIVADO (y eliminado de tabs). Solo guardas con botón.
-autosave_activo = False
+autosave_activo = st.sidebar.checkbox("💾 Auto-guardado inserts", value=False)
 
 if "saving" not in st.session_state:
     st.session_state["saving"] = False
