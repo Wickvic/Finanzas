@@ -836,19 +836,19 @@ def guardar_cambios_robusto(tab_key: str, df_edit: pd.DataFrame, modo: str, cols
             st.success(f"Guardado OK (inserts: {len(res_in)} | updates: {len(res_up)} | borrados: {len(ids_borrar)})")
 
         mark_saved(tab_key, df_edit, cols_fingerprint)
-
+        
         # refresco limpio
-        invalidate_data()
-        st.rerun()
+        invalidate_data()
+        st.rerun()
 
-    except Exception as e:
-        # CLAVE: si algo revienta, no dejes el lock pillado
-        st.error(f"Error guardando: {e}")
-        if modo_debug:
-            import traceback
-            st.code(traceback.format_exc())
-    finally:
-        st.session_state[lock_key] = False
+    except Exception as e:
+        # CLAVE: si algo revienta, no dejes el lock pillado
+        st.error(f"Error guardando: {e}")
+        if modo_debug:
+            import traceback
+            st.code(traceback.format_exc())
+    finally:
+        st.session_state[lock_key] = False
 
 
 # ---------- TAB GASTOS ----------
