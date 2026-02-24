@@ -695,6 +695,8 @@ def invalidate_data():
 st.set_page_config(page_title="Finanzas Familiares", layout="wide")
 col_title, col_reset = st.columns([6,1])
 
+col_title, col_reset = st.columns([6,1])
+
 with col_title:
     st.title("Finanzas familiares")
 
@@ -782,7 +784,6 @@ def filtros_anio_mes_texto(prefix, modo_movil_local):
         with c3:
             texto = st.text_input("Buscar en descripción", key=f"busca_{prefix}")
         return anio, mes, texto
-
 
 def guardar_cambios_robusto(tab_key: str, df_edit: pd.DataFrame, modo: str, cols_fingerprint: List[str]):
     lock_key = f"saving_{tab_key}"
