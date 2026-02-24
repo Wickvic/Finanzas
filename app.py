@@ -1011,7 +1011,7 @@ with tab_ingresos:
     unsaved_banner("ingresos", df_i_edit, cols=["id", "fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"])
     total_i_filtro = float(df_i["importe"].fillna(0).sum())
     st.metric("Total ingresos (filtro)", f"{total_i_filtro:,.2f} €")
-    if st.button("💾 Guardar cambios", key="save_gastos"):
+    if st.button("💾 Guardar cambios", key="save_gastos_ing"):
         guardar_cambios_robusto(
             "ingresos", df_i_edit, modo="ingresos",
             cols_fingerprint=["id", "fecha", "descripcion", "categoria", "cuenta", "importe", "🗑 Eliminar"]
@@ -1068,7 +1068,7 @@ with tab_transf:
 
     unsaved_banner("transf", df_t_edit, cols=["id", "fecha", "descripcion", "cuenta", "cuenta_destino", "importe", "🗑 Eliminar"])
 
-    if st.button("💾 Guardar cambios", key="save_gastos"):
+    if st.button("💾 Guardar cambios", key="save_gastos_trans"):
         guardar_cambios_robusto(
             "transf", df_t_edit, modo="transferencias",
             cols_fingerprint=["id", "fecha", "descripcion", "cuenta", "cuenta_destino", "importe", "🗑 Eliminar"]
